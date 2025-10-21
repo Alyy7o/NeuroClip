@@ -1,5 +1,5 @@
 import { motion } from 'framer-motion';
-import { Sparkles } from 'lucide-react';
+import { ScissorsLineDashed } from 'lucide-react';
 import { Card, CardContent } from '@/components/ui/card';
 
 const processingSteps = [
@@ -31,7 +31,7 @@ export function ProcessingLoader() {
               }}
               className="flex h-12 w-12 sm:h-16 sm:w-16 items-center justify-center rounded-xl bg-gradient-to-br from-violet-500 to-purple-600 text-white shadow-lg"
             >
-              <Sparkles className="h-6 w-6 sm:h-8 sm:w-8" />
+              <ScissorsLineDashed className="h-6 w-6 sm:h-8 sm:w-8" />
             </motion.div>
 
             <h3 className="text-lg sm:text-xl font-bold text-center">Processing Your Video</h3>

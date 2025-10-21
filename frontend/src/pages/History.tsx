@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { motion } from 'framer-motion';
-import { History as HistoryIcon, Sparkles, EyeOff, Minimize2, Calendar, FileVideo, Play } from 'lucide-react';
+import { History as HistoryIcon, ScissorsLineDashed, EyeOff, Minimize2, Calendar, FileVideo, Play } from 'lucide-react';
 import { DashboardLayout } from '@/components/DashboardLayout';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
@@ -10,7 +10,7 @@ import { useNavigate } from 'react-router-dom';
 import { Badge } from '@/components/ui/badge';
 
 const moduleIcons = {
-  summarization: Sparkles,
+  summarization: ScissorsLineDashed,
   blurring: EyeOff,
   compression: Minimize2,
 };

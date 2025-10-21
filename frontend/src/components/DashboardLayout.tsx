@@ -3,7 +3,7 @@ import { NavLink, useNavigate } from 'react-router-dom';
 import { motion, AnimatePresence } from 'framer-motion';
 import { 
   Video, 
-  Sparkles, 
+  ScissorsLineDashed, 
   EyeOff, 
   Minimize2, 
   History, 
@@ -30,7 +30,7 @@ interface DashboardLayoutProps {
 }
 
 const navItems = [
-  { icon: Sparkles, label: 'Summarization', path: '/summarization' },
+  { icon: ScissorsLineDashed, label: 'Summarization', path: '/summarization' },
   { icon: EyeOff, label: 'Blurring', path: '/blurring' },
   { icon: Minimize2, label: 'Compression', path: '/compression' },
   { icon: History, label: 'History', path: '/history' },
@@ -150,8 +150,9 @@ export function DashboardLayout({ children }: DashboardLayoutProps) {
               {/* Close Button */}
               <div className="flex items-center justify-between mb-8">
                 <div className="flex items-center gap-2">
-                  <div className="flex h-8 w-8 items-center justify-center rounded-lg gradient-primary shadow-glow">
-                    <Video className="h-4 w-4 text-primary-foreground" />
+                  <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-white shadow-glow">
+                    {/* <Video className="h-4 w-4 text-primary-foreground" /> */}
+                    <img src="/logo-n.png" alt="NeuroClip" className="h-28 w-28 object-contain" />
                   </div>
                   <span className="text-lg font-bold">NeuroClip</span>
                 </div>

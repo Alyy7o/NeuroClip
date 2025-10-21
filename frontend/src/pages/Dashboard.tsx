@@ -1,13 +1,13 @@
 import { motion } from 'framer-motion';
 import { useNavigate } from 'react-router-dom';
-import { Sparkles, EyeOff, Minimize2, ArrowRight } from 'lucide-react';
+import { ScissorsLineDashed, EyeOff, Minimize2, ArrowRight } from 'lucide-react';
 import { DashboardLayout } from '@/components/DashboardLayout';
 import { Card, CardHeader, CardTitle, CardDescription } from '@/components/ui/card';
 import { useAuth } from '@/contexts/AuthContext';
 
 const modules = [
   {
-    icon: Sparkles,
+    icon: ScissorsLineDashed,
     title: 'Video Summarization',
     description: 'Extract key highlights from your videos with AI-powered analysis',
     path: '/summarization',

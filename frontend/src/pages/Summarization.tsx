@@ -1,6 +1,6 @@
 // import { useState, useEffect } from 'react';
 // import { motion, AnimatePresence } from 'framer-motion';
-// import { Sparkles, Play, Download, ArrowLeft, Image as ImageIcon } from 'lucide-react';
+// import { ScissorsLineDashed, Play, Download, ArrowLeft, Image as ImageIcon } from 'lucide-react';
 // import { DashboardLayout } from '@/components/DashboardLayout';
 // import { VideoInput } from '@/components/VideoInput';
 // import { VideoPreview } from '@/components/VideoPreview';
@@ -233,7 +233,7 @@
 //         >
 //         <div className="flex items-center gap-3">
 //           <div className="flex h-12 w-12 items-center justify-center rounded-xl bg-gradient-to-br from-violet-500 to-purple-600 text-white shadow-lg">
-//             <Sparkles className="h-6 w-6" />
+//             <ScissorsLineDashed className="h-6 w-6" />
 //           </div>
 //           <div>
 //             <h1 className="text-3xl font-bold">Video Summarization</h1>
@@ -339,7 +339,7 @@
 
 //           <div className="flex items-center gap-3">
 //             <div className="flex h-12 w-12 items-center justify-center rounded-xl bg-gradient-to-br from-violet-500 to-purple-600 text-white shadow-lg">
-//               <Sparkles className="h-6 w-6" />
+//               <ScissorsLineDashed className="h-6 w-6" />
 //             </div>
 //             <div>
 //               <h1 className="text-3xl font-bold">Processing Results</h1>
@@ -434,7 +434,7 @@
 
 import { useState } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { Sparkles, Play, Download, ArrowLeft } from 'lucide-react';
+import { ScissorsLineDashed, Play, Download, ArrowLeft } from 'lucide-react';
 import { DashboardLayout } from '@/components/DashboardLayout';
 import { VideoInput } from '@/components/VideoInput';
 import { VideoPreview } from '@/components/VideoPreview';
@@ -592,7 +592,7 @@ export default function Summarization() {
         >
         <div className="flex items-center gap-3">
           <div className="flex h-12 w-12 items-center justify-center rounded-xl bg-gradient-to-br from-violet-500 to-purple-600 text-white shadow-lg">
-            <Sparkles className="h-6 w-6" />
+            <ScissorsLineDashed className="h-6 w-6" />
           </div>
           <div>
             <h1 className="text-3xl font-bold">Video Summarization</h1>
@@ -698,7 +698,7 @@ export default function Summarization() {
 
           <div className="flex items-center gap-3">
             <div className="flex h-12 w-12 items-center justify-center rounded-xl bg-gradient-to-br from-violet-500 to-purple-600 text-white shadow-lg">
-              <Sparkles className="h-6 w-6" />
+              <ScissorsLineDashed className="h-6 w-6" />
             </div>
             <div>
               <h1 className="text-3xl font-bold">Processing Results</h1>

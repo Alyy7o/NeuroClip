@@ -1,5 +1,5 @@
 import { motion } from 'framer-motion';
-import { ArrowRight, Sparkles, EyeOff, Minimize2 } from 'lucide-react';
+import { ArrowRight, ScissorsLineDashed, EyeOff, Minimize2 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { useNavigate } from 'react-router-dom';
 import { ThemeToggle } from '@/components/ThemeToggle';
@@ -51,7 +51,7 @@ export default function Index() {
 
           <div className="grid md:grid-cols-3 gap-6 mt-20">
             {[
-              { icon: Sparkles, title: 'Smart Summarization', desc: 'Extract key highlights instantly' },
+              { icon: ScissorsLineDashed, title: 'Smart Summarization', desc: 'Extract key highlights instantly' },
               { icon: EyeOff, title: 'Auto Blurring', desc: 'Protect sensitive content' },
               { icon: Minimize2, title: 'Compression', desc: 'Reduce size, keep quality' },
             ].map((feature, i) => (

@@ -53,10 +53,10 @@ export function DashboardLayout({ children }: DashboardLayoutProps) {
       <header className="sticky top-0 z-50 w-full border-b border-border/50 gradient-card">
         <div className="container mx-auto flex h-16 items-center justify-between px-4 md:px-6">
           {/* Logo */}
-          <div className="flex items-center gap-1 cursor-pointer" onClick={() => navigate('/dashboard')}>
+          <div className="flex items-center cursor-pointer" onClick={() => navigate('/dashboard')}>
             {/* <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-white shadow-glow"> */}
               {/* <Video className="h-4 w-4 text-primary-foreground" /> */}
-              <img src="/logo-n-512.png" alt="NeuroClip" className="h-28 w-28 object-contain" />
+              <img src="/logo-n-1080.png" alt="NeuroClip" className="h-28 w-28 object-contain" />
             {/* </div> */}
             <span className="text-lg font-bold hidden sm:inline">NeuroClip</span>
           </div>

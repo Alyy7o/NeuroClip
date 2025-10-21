@@ -1,0 +1,179 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Definition of the design system. All colors, gradients, fonts, etc should be defined here. 
+All colors MUST be HSL.
+*/
+
+@layer base {
+  :root {
+    --background: 0 0% 100%;
+    --foreground: 230 15% 12%;
+    
+    --card: 0 0% 100%;
+    --card-foreground: 230 15% 15%;
+    
+    --popover: 0 0% 100%;
+    --popover-foreground: 230 15% 15%;
+    
+    /* Professional palette: Indigo primary, Teal accent, neutral surfaces */
+    --primary: 245 58% 51%; /* ~Indigo 600 */
+    --primary-foreground: 0 0% 100%;
+    
+    --secondary: 220 14% 96%;
+    --secondary-foreground: 230 15% 20%;
+    
+    --muted: 220 14% 96%;
+    --muted-foreground: 220 9% 40%;
+    
+    --accent: 172 66% 40%; /* Teal 600 */
+    --accent-foreground: 0 0% 100%;
+    
+    --destructive: 0 84% 60%;
+    --destructive-foreground: 0 0% 100%;
+    
+    --border: 220 13% 89%;
+    --input: 220 13% 89%;
+    --ring: 245 58% 51%;
+    
+    --radius: 1rem;
+    
+    --gradient-primary: linear-gradient(135deg, hsl(245, 58%, 51%), hsl(172, 66%, 40%));
+    --gradient-accent: linear-gradient(135deg, hsl(172, 66%, 40%), hsl(245, 58%, 60%));
+    --gradient-card: linear-gradient(180deg, hsl(0, 0%, 100%), hsl(220, 14%, 97%));
+    
+    --shadow-subtle: 0 1px 3px 0 hsl(220, 13%, 20%, 0.08);
+    --shadow-medium: 0 4px 6px -1px hsl(220, 13%, 20%, 0.1), 0 2px 4px -1px hsl(220, 13%, 20%, 0.06);
+    --shadow-large: 0 20px 25px -5px hsl(220, 13%, 20%, 0.1), 0 10px 10px -5px hsl(220, 13%, 20%, 0.04);
+    --shadow-glow: 0 0 30px hsl(217, 91%, 45%, 0.2);
+    
+    --transition-smooth: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+  }
+  
+  .dark {
+    --background: 230 25% 7%;
+    --foreground: 0 0% 98%;
+    
+    --card: 230 20% 12%;
+    --card-foreground: 0 0% 98%;
+    
+    --popover: 230 20% 12%;
+    --popover-foreground: 0 0% 98%;
+    
+    --primary: 245 58% 60%;
+    --primary-foreground: 0 0% 100%;
+    
+    --secondary: 230 14% 16%;
+    --secondary-foreground: 0 0% 98%;
+    
+    --muted: 230 14% 16%;
+    --muted-foreground: 220 9% 65%;
+    
+    --accent: 172 66% 48%;
+    --accent-foreground: 0 0% 100%;
+    
+    --destructive: 0 84% 60%;
+    --destructive-foreground: 0 0% 100%;
+    
+    --border: 230 20% 22%;
+    --input: 230 20% 22%;
+    --ring: 245 58% 60%;
+    
+    --gradient-primary: linear-gradient(135deg, hsl(245, 58%, 60%), hsl(172, 66%, 48%));
+    --gradient-accent: linear-gradient(135deg, hsl(172, 66%, 48%), hsl(245, 58%, 68%));
+    --gradient-card: linear-gradient(180deg, hsl(230, 20%, 12%), hsl(225, 18%, 15%));
+    
+    --shadow-subtle: 0 1px 3px 0 hsl(0, 0%, 0%, 0.3);
+    --shadow-medium: 0 4px 6px -1px hsl(0, 0%, 0%, 0.3), 0 2px 4px -1px hsl(0, 0%, 0%, 0.2);
+    --shadow-large: 0 20px 25px -5px hsl(0, 0%, 0%, 0.3), 0 10px 10px -5px hsl(0, 0%, 0%, 0.2);
+    --shadow-glow: 0 0 40px hsl(217, 91%, 55%, 0.3);
+  }
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+
+  body {
+    @apply bg-background text-foreground antialiased;
+    font-feature-settings: "rlig" 1, "calt" 1;
+  }
+  
+  /* Smooth transitions for theme switching */
+  * {
+    transition: background-color 0.3s cubic-bezier(0.4, 0, 0.2, 1),
+                border-color 0.3s cubic-bezier(0.4, 0, 0.2, 1),
+                color 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+  }
+}
+
+@layer utilities {
+  .gradient-primary {
+    background: var(--gradient-primary);
+  }
+  
+  .gradient-accent {
+    background: var(--gradient-accent);
+  }
+  
+  .gradient-card {
+    background: var(--gradient-card);
+  }
+  
+  .shadow-glow {
+    box-shadow: var(--shadow-glow);
+  }
+  
+  .hover-lift {
+    @apply transition-all duration-300;
+  }
+  
+  .hover-lift:hover {
+    @apply -translate-y-1 shadow-lg;
+  }
+  
+  .animate-fade-in {
+    animation: fadeIn 0.5s ease-out;
+  }
+  
+  .animate-slide-up {
+    animation: slideUp 0.5s ease-out;
+  }
+  
+  .animate-scale-in {
+    animation: scaleIn 0.3s ease-out;
+  }
+}
+
+@keyframes fadeIn {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes slideUp {
+  from {
+    opacity: 0;
+    transform: translateY(20px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes scaleIn {
+  from {
+    opacity: 0;
+    transform: scale(0.95);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}

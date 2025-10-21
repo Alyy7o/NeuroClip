@@ -1,0 +1,59 @@
+# Frontend
+
+# Node dependencies (frontend)
+frontend/node_modules/
+
+# Build outputs
+frontend/dist/
+frontend/build/
+frontend/.vercel/
+frontend/.tmp/
+frontend/temp/
+
+# Environment variables
+frontend/.env
+frontend/.env.local
+frontend/.env.development.local
+frontend/.env.production.local
+frontend/.env.test.local
+
+# Logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Editor directories and files
+.vscode/
+.idea/
+.DS_Store
+*.swp
+
+# OS / IDE junk
+Thumbs.db
+*.log
+*.tmp
+
+# TypeScript
+*.tsbuildinfo
+
+# Misc
+coverage/
+
+
+# backend
+
+backend/node_modules/
+backend/dist/
+backend/build/
+backend/.tmp/
+backend/temp/
+
+backend/.env
+backend/.env.local
+backend/.env.development.local
+backend/.env.production.local
+backend/.env.test.local
+
+backend/package-lock.json
+backend/yarn.lock

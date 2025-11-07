@@ -1,0 +1,16 @@
+# Ignore all video files
+*.mp4
+
+src/__pycache__
+
+extra_codes/
+
+weaviate_data/
+
+semantic_search_env/
+
+.ipynb_checkpoints
+
+nohup.out
+
+2016-02-02

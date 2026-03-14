@@ -53,12 +53,8 @@ export default function Compression() {
     setProcessing(true);
 
     try {
-      const originalSize = file ? file.size : 50000000;
-      const compressedSize = Math.floor(originalSize * 0.3);
-      const queryString = `Time range: ${timeRange.start.toFixed(1)}s - ${timeRange.end.toFixed(1)}s`;
-
       const validationResult = processingSchema.safeParse({
-        query: queryString,
+        query: 'H.265 / 720p / CRF 28 (Fast)',
         url: url || '',
         fileName: file?.name
       });
@@ -75,45 +71,54 @@ export default function Compression() {
 
       const validated = validationResult.data;
 
-      const { error } = await supabase.from('processing_history').insert({
-        user_id: user?.id,
-        module: 'compression',
-        input_type: file ? 'file' : 'url',
-        input_url: validated.url || validated.fileName,
-        query: validated.query,
-        original_size: originalSize,
-        processed_size: compressedSize,
-        status: 'completed',
+      // Prepare form data for the actual backend compression API
+      const formData = new FormData();
+      if (file) {
+        formData.append('file', file);
+      } else {
+        throw new Error("URL compression not yet supported in this flow."); // Only using file for now based on UI
+      }
+      if (user?.id) {
+        formData.append('user_id', user.id);
+      }
+
+      const API_BASE = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8040';
+      const response = await fetch(`${API_BASE}/compress-video`, {
+        method: 'POST',
+        body: formData,
       });
 
-      if (error) throw error;
+      if (!response.ok) {
+        const errData = await response.json().catch(() => null);
+        throw new Error(errData?.detail || 'Compression failed on server');
+      }
 
-      await new Promise(resolve => setTimeout(resolve, 5000));
+      const data = await response.json();
 
-      const mockVideoUrl = file ? URL.createObjectURL(file) : url;
+      const originalSize = data.original_size;
+      const compressedSize = data.compressed_size;
+      const reduction = data.reduction;
+      const processedVideoUrl = `${API_BASE}${data.url}`;
 
       setResult({
-        processedVideoUrl: mockVideoUrl,
+        processedVideoUrl: processedVideoUrl,
         originalSize,
         compressedSize,
-        reduction: Math.round(((originalSize - compressedSize) / originalSize) * 100),
+        reduction: reduction,
         explanation: `Your video has been successfully compressed using advanced H.265 (HEVC) encoding technology.
 
 **Compression Statistics:**
 - Original size: ${formatFileSize(originalSize)}
 - Compressed size: ${formatFileSize(compressedSize)}
-- Size reduction: ${Math.round(((originalSize - compressedSize) / originalSize) * 100)}%
-- Selected segment: ${timeRange.start.toFixed(1)}s to ${timeRange.end.toFixed(1)}s
-- Duration: ${(timeRange.end - timeRange.start).toFixed(1)}s
+- Size reduction: ${reduction}%
 
 **Technical Details:**
-- Codec: H.265/HEVC
-- Bitrate optimization: Adaptive
-- Quality preservation: 98%
-- Resolution: Maintained original
-- Audio: AAC compression applied
+- Codec: H.265/HEVC (libx265)
+- Resolution: Max 720p (scaled)
+- Quality Control: CRF 28 (Fast Preset)
+- Audio: AAC compression (128k)
 
-The compression algorithm intelligently reduces file size while maintaining visual quality. The selected time segment has been optimized for both storage efficiency and playback quality.`,
+The compression algorithm intelligently scales the video down to 720p and optimizes the bitrate using Constant Rate Factor (CRF) encoding. We use a 'fast' hardware-optimized preset to drastically reduce processing time while still achieving massive file size reductions.`,
         duration: timeRange.end - timeRange.start,
         originalDuration: timeRange.end,
       });
@@ -216,9 +221,18 @@ The compression algorithm intelligently reduces file size while maintaining visu
               </CardHeader>
               <CardContent className="space-y-6">
                 <VideoPlayer videoUrl={result?.processedVideoUrl} />
-                
+
                 <div className="flex flex-col sm:flex-row gap-3">
-                  <Button className="flex-1 gradient-primary" size="lg">
+                  <Button className="flex-1 gradient-primary" size="lg" onClick={() => {
+                    const a = document.createElement('a');
+                    a.href = result?.processedVideoUrl;
+                    a.download = 'compressed_video.mp4'; // Suggest a name, though headers usually dictate
+                    a.target = '_blank';
+                    // We can also trigger a direct download via our backend /download endpoint if cross-origin rules prevent it
+                    document.body.appendChild(a);
+                    a.click();
+                    document.body.removeChild(a);
+                  }}>
                     <Download className="mr-2 h-4 w-4" />
                     Download Compressed Video
                   </Button>
@@ -272,8 +286,8 @@ The compression algorithm intelligently reduces file size while maintaining visu
                   <div className="space-y-4">
                     <div className="flex items-center justify-between">
                       <p className="text-sm text-muted-foreground">Selected: {file.name}</p>
-                      <Button 
-                        variant="outline" 
+                      <Button
+                        variant="outline"
                         size="sm"
                         onClick={() => setFile(null)}
                       >
@@ -289,17 +303,17 @@ The compression algorithm intelligently reduces file size while maintaining visu
                   <div className="space-y-4">
                     <div className="flex items-center justify-between">
                       <p className="text-sm text-muted-foreground">Video URL loaded</p>
-                      <Button 
-                        variant="outline" 
+                      <Button
+                        variant="outline"
                         size="sm"
                         onClick={() => setUrl('')}
                       >
                         Change Video
                       </Button>
                     </div>
-                    <UrlVideoPreview 
-                      url={url} 
-                      onTimeRangeChange={(start, end) => setTimeRange({ start, end })} 
+                    <UrlVideoPreview
+                      url={url}
+                      onTimeRangeChange={(start, end) => setTimeRange({ start, end })}
                     />
                   </div>
                 ) : (

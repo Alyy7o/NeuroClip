@@ -1,0 +1,58 @@
+# Azure Student GPU Guide
+
+## 1. Requesting the GPU Quota (Email/Support Template)
+
+By default, Azure student accounts have a very strict `0` quota for the `NCv3` (NVIDIA V100) or `NCas_T4_v3` (NVIDIA T4) series to prevent crypto-mining abuse. You must open a support ticket within the Azure Portal to request an increase.
+
+**How to submit the request:**
+1. Go to the Azure Portal -> **Help + support** -> **Create a support request**.
+2. **Issue Type**: Service and subscription limits (quotas).
+3. **Quota type**: Compute-VM (cores-vCPUs).
+4. **Details**: Request an increase for the `Standard NCas_T4_v3 Family vCPUs` (or whichever region has T4 GPUs available) from `0` to `4` (the minimum needed for a single GPU instance).
+
+**Support Request Description Template:**
+
+> **Subject:** Request for Compute Quota Increase (NCas_T4_v3 Family) for University Capstone Project
+> 
+> Hello Azure Support Team,
+> 
+> I am writing to request a quota increase for the **Standard NCas_T4_v3 Family vCPUs** from 0 to 4 in the [Region Name, e.g., East US] region.
+> 
+> I am currently using my GitHub Student Developer Pack credits to build my final year university capstone project, "NeuroClip." This is a video intelligence application that requires GPU hardware acceleration for two specific tasks:
+> 1. Video compression using FFmpeg NVENC (H.265 encoding).
+> 2. Generating vector embeddings using Deep Learning models (OpenCLIP and SentenceTransformers).
+> 
+> I only require a single T4 GPU instance (4 vCPUs) to host the backend during my development and evaluation phases. I am not running any crypto-mining or continuous high-load operations; the GPU will be strictly triggered on-demand for processing user video uploads.
+> 
+> Thank you for supporting student developers!
+> 
+> Best regards,
+> [Your Name]
+> [Your University]
+
+---
+
+## 2. Managing Cloud Costs (Turning the GPU On/Off)
+
+In the cloud, you don't just "turn off the GPU." You pay for the entire Virtual Machine as long as it is running. To minimize your `$100` credit usage:
+
+### Option A: Manual Deallocation (Easiest)
+When you are done testing NeuroClip for the day, you must go into the Azure Portal and click **Stop** on the Virtual Machine. 
+* *Crucial*: Ensure the status says **"Stopped (Deallocated)"**. If it just says "Stopped", Azure is still reserving the hardware and charging you! When "Deallocated," you are only charged a few pennies a day for the storage disk holding your code.
+
+### Option B: Automated Scripts (Intermediate)
+You can write a simple Python script on your local laptop using the `azure-mgmt-compute` SDK that automatically turns the Azure VM on before you start working, and turns it off after.
+
+### Option C: The "Serverless" Approach (Advanced/Ideal Architecture)
+If you want NeuroClip to be a real product where users can upload videos at 3 AM without draining your credits all month, you cannot leave the Azure VM running 24/7. 
+
+**The architectural shift:**
+1. **Frontend**: React app hosted for free (Vercel/Netlify).
+2. **Main Backend**: A lightweight, cheap, standard CPU server (or serverless function) that handles authentication, database logic, and API routes.
+3. **GPU Worker**: Your heavy [main.py](file:///d:/FYP/NeuroClip/NeuroClip/backend/Semantic-search-app/backend/main.py) FFmpeg and OpenCLIP logic sits on the Azure GPU VM. 
+4. **The Flow**: 
+   * A user uploads a video to the main backend.
+   * The backend uses the Azure SDK/API to send a "Wake Up" command to start your sleeping GPU VM.
+   * The GPU wakes up (takes ~1 minute), processes the video, updates Supabase, and then immediately runs an OS script to shut itself down/deallocate. 
+   
+This ensures you only burn your $100 credit for the exact 2-3 minutes it takes to process a video!

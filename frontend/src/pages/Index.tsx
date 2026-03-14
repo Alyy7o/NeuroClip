@@ -22,13 +22,13 @@ export default function Index() {
           {/* </div> */}
           {/* <span className="text-2xl font-bold">NeuroClip</span> */}
         </div>
-        <div className="flex items-center gap-4">
+        <div className="flex items-center gap-4 pr-6">
           <ThemeToggle />
           <Button onClick={() => navigate('/auth')}>Get Started</Button>
         </div>
       </header>
 
-      <main className="container mx-auto px-6 py-20">
+      <main className="container mx-auto px-6 pt-6 pb-10">
         <motion.div
           initial={{ opacity: 0, y: 20 }}
           animate={{ opacity: 1, y: 0 }}
@@ -42,7 +42,7 @@ export default function Index() {
           </h1>
           
           <p className="text-xl text-muted-foreground max-w-2xl mx-auto">
-            AI-powered video summarization, intelligent blurring, and smart compression—all in one platform.
+            AI-powered video summarization, intelligent blurring, and smart compression, All in one platform.
           </p>
 
           <Button size="lg" className="gradient-primary hover:opacity-90" onClick={() => navigate('/auth')}>

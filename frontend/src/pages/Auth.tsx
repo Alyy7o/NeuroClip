@@ -118,7 +118,7 @@ export default function Auth() {
 
             {/* Logo */}
           <div className="mx-auto flex justify-center">
-            <img src="/logo-n-1080.png" alt="NeuroClip" className="h-32 w-32 object-contain" />
+            <img src="/logo-n-1080.png" alt="NeuroClip" className="h-28 w-28 object-contain scale-150" />
           </div>
 
           <h1 className="text-4xl font-bold bg-gradient-to-r from-primary to-accent bg-clip-text text-transparent">

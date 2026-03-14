@@ -121,7 +121,7 @@ export function VideoInput({ onFileSelect, onUrlSubmit, file, url, disabled }: V
                     </p>
                   </div>
                   <p className="text-xs text-muted-foreground">
-                    Supports MP4, MOV, AVI, and more
+                    Supports MP4, MOV, and more
                   </p>
                 </>
               )}

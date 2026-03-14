@@ -56,7 +56,7 @@ export function DashboardLayout({ children }: DashboardLayoutProps) {
           <div className="flex items-center cursor-pointer" onClick={() => navigate('/dashboard')}>
             {/* <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-white shadow-glow"> */}
               {/* <Video className="h-4 w-4 text-primary-foreground" /> */}
-              <img src="/logo-n-1080.png" alt="NeuroClip" className="h-28 w-28 object-contain" />
+              <img src="/logo-n-1080.png" alt="NeuroClip" className="h-24 w-24 scale-110 object-contain" />
             {/* </div> */}
             <span className="text-lg font-bold hidden sm:inline">NeuroClip</span>
           </div>
@@ -145,16 +145,16 @@ export function DashboardLayout({ children }: DashboardLayoutProps) {
               animate={{ x: 0 }}
               exit={{ x: '100%' }}
               transition={{ type: 'spring', damping: 25, stiffness: 200 }}
-              className="fixed top-0 right-0 bottom-0 z-50 w-72 gradient-card border-l border-border/50 p-6 shadow-xl lg:hidden overflow-y-auto"
+              className="fixed top-0 right-0 bottom-0 z-50 w-72 gradient-card border-l border-border/50 p-3 shadow-xl lg:hidden overflow-y-auto"
             >
               {/* Close Button */}
-              <div className="flex items-center justify-between mb-8">
+              <div className="flex items-center justify-between">
                 <div className="flex items-center gap-2">
-                  <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-white shadow-glow">
+                  {/* <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-white shadow-glow"> */}
                     {/* <Video className="h-4 w-4 text-primary-foreground" /> */}
-                    <img src="/logo-n.png" alt="NeuroClip" className="h-28 w-28 object-contain" />
-                  </div>
-                  <span className="text-lg font-bold">NeuroClip</span>
+                    <img src="/logo-n.png" alt="NeuroClip" className="h-16 w-16 scale-150 object-contain" />
+                  {/* </div> */}
+                  {/* <span className="text-lg font-bold">NeuroClip</span> */}
                 </div>
                 <Button
                   variant="ghost"

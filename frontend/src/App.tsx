@@ -13,6 +13,8 @@ import Summarization from "./pages/Summarization";
 import Blurring from "./pages/Blurring";
 import Compression from "./pages/Compression";
 import History from "./pages/History";
+import VideoClips from "./pages/VideoClips";
+import DownloadClip from "./pages/DownloadClip";
 import Profile from "./pages/Profile";
 import NotFound from "./pages/NotFound";
 
@@ -34,6 +36,8 @@ const App = () => (
               <Route path="/blurring" element={<ProtectedRoute><Blurring /></ProtectedRoute>} />
               <Route path="/compression" element={<ProtectedRoute><Compression /></ProtectedRoute>} />
               <Route path="/history" element={<ProtectedRoute><History /></ProtectedRoute>} />
+              <Route path="/video/:id" element={<ProtectedRoute><VideoClips /></ProtectedRoute>} />
+              <Route path="/download-clip" element={<ProtectedRoute><DownloadClip /></ProtectedRoute>} />
               <Route path="/profile" element={<ProtectedRoute><Profile /></ProtectedRoute>} />
               <Route path="*" element={<NotFound />} />
             </Routes>

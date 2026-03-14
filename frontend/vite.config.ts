@@ -16,7 +16,10 @@ export default defineConfig(({ mode }) => ({
     VitePWA({
       registerType: "autoUpdate",
       injectRegister: "auto",
-      includeAssets: ["favicon.ico", "robots.txt", "logo-2-n-192.png", "logo-2-n-512.png"],
+      devOptions: {
+        enabled: true
+      },
+      includeAssets: ["favicon.svg", "robots.txt", "logo-2-n-192.png", "logo-2-n-512.png"],
       manifest: {
         name: "NeuroClip",
         short_name: "NeuroClip",

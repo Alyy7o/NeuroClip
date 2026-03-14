@@ -1,6 +1,6 @@
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { motion } from 'framer-motion';
-import { History as HistoryIcon, ScissorsLineDashed, EyeOff, Minimize2, Calendar, FileVideo, Play } from 'lucide-react';
+import { History as HistoryIcon, ScissorsLineDashed, EyeOff, Minimize2, Calendar, FileVideo, Play, Download } from 'lucide-react';
 import { DashboardLayout } from '@/components/DashboardLayout';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
@@ -22,30 +22,99 @@ const moduleColors = {
 };
 
 export default function History() {
-  const [history, setHistory] = useState<any[]>([]);
+  type VideoMeta = {
+    id: string;
+    title?: string;
+    original_filename?: string;
+    video_url?: string;
+    duration?: number;
+    created_at?: string;
+    metadata?: { json_path?: string; srt_path?: string } | null;
+    thumbnail_url?: string | null;
+  };
+  type HistoryItem = {
+    id: string;
+    created_at: string;
+    query?: string | null;
+    status: string;
+    module?: string | null;
+    job_id?: string | null;
+    video?: VideoMeta | null;
+  };
+  const [items, setItems] = useState<HistoryItem[]>([]);
   const [loading, setLoading] = useState(true);
+  const [search, setSearch] = useState("");
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(10);
   const { user } = useAuth();
   const navigate = useNavigate();
 
-  useEffect(() => {
-    fetchHistory();
-  }, []);
-
-  const fetchHistory = async () => {
+  const fetchHistory = useCallback(async () => {
+    if (!user?.id) return;
+    setLoading(true);
     try {
-      const { data, error } = await supabase
+      let sel = supabase
         .from('processing_history')
-        .select('*')
-        .eq('user_id', user?.id)
-        .order('created_at', { ascending: false });
-
+        .select('id,created_at,query,status,job_id,module')
+        .eq('user_id', user.id)
+        .order('created_at', { ascending: false })
+        .range((page - 1) * pageSize, (page * pageSize) - 1);
+      if (search.trim()) {
+        sel = sel.or(`query.ilike.%${search.trim()}%,job_id.eq.${search.trim()}`);
+      }
+      const { data: rows, error } = await sel;
       if (error) throw error;
-      setHistory(data || []);
-    } catch (error) {
-      console.error('Error fetching history:', error);
+      const vids: string[] = Array.from(new Set((rows || []).map((r: any) => r.job_id).filter(Boolean))).map(String);
+      const vmeta: Record<string, VideoMeta> = {};
+      if (vids.length > 0) {
+        const { data: vm, error: vErr } = await supabase
+          .from('video_embeddings' as any)
+          .select('job_id,title,video_url,duration')
+          .in('job_id', vids as string[])
+          .returns<{ job_id: string; title?: string; video_url?: string; duration?: number }[]>();
+        if (vErr) throw vErr;
+        for (const r of vm || []) vmeta[r.job_id] = {
+          id: r.job_id,
+          title: r.title,
+          video_url: r.video_url,
+          duration: r.duration,
+          original_filename: undefined,
+          created_at: undefined,
+          metadata: null,
+          thumbnail_url: null,
+        };
+      }
+      const items: HistoryItem[] = (rows || []).map((r: any) => ({
+        id: r.id,
+        created_at: r.created_at,
+        query: r.query,
+        status: r.status,
+        module: r.module,
+        job_id: r.job_id,
+        video: vmeta[r.job_id] || null,
+      }));
+
+      console.log("items", items)
+      setItems(items);
+    } catch (e) {
+      console.error('Error fetching history:', e);
+      setItems([]);
     } finally {
       setLoading(false);
     }
+  }, [user?.id, page, pageSize, search]);
+
+  useEffect(() => {
+    fetchHistory();
+  }, [fetchHistory]);
+
+
+
+  const hasMore = useMemo(() => items.length === pageSize, [items, pageSize]);
+
+  const onSearchChange = (v: string) => {
+    setSearch(v);
+    setPage(1);
   };
 
   const formatDate = (dateString: string) => {
@@ -88,7 +157,20 @@ export default function History() {
           </div>
         </div>
 
-        {history.length === 0 ? (
+        <div className="flex flex-col sm:flex-row sm:items-center gap-3 sm:gap-4">
+          <input
+            className="flex-1 px-3 py-2 rounded-md border border-border bg-background"
+            placeholder="Search history..."
+            value={search}
+            onChange={(e) => onSearchChange(e.target.value)}
+          />
+          <div className="flex items-center gap-2">
+            <Button variant="outline" size="sm" onClick={() => setPage(Math.max(1, page - 1))} disabled={page === 1}>Prev</Button>
+            <Button variant="outline" size="sm" onClick={() => setPage(page + 1)} disabled={!hasMore}>Next</Button>
+          </div>
+        </div>
+
+        {items.length === 0 ? (
           <Card className="gradient-card border-border/50">
             <CardContent className="py-12 text-center">
               <FileVideo className="h-12 w-12 text-muted-foreground mx-auto mb-4" />
@@ -100,9 +182,13 @@ export default function History() {
           </Card>
         ) : (
           <div className="grid gap-4">
-            {history.map((item, index) => {
+            {items.map((item, index) => {
               const Icon = moduleIcons[item.module as keyof typeof moduleIcons];
               const gradient = moduleColors[item.module as keyof typeof moduleColors];
+              const v = item.video as VideoMeta | undefined;
+              const title = v?.original_filename || 'Video';
+              const thumb = (v?.thumbnail_url as string | undefined) || undefined;
+              const dur = v?.duration || 0;
 
               return (
                 <motion.div
@@ -120,10 +206,10 @@ export default function History() {
                               <Icon className="h-4 w-4 sm:h-5 sm:w-5" />
                             </div>
                             <div className="min-w-0 flex-1">
-                              <CardTitle className="capitalize text-base sm:text-lg">{item.module}</CardTitle>
+                              <CardTitle className="text-base sm:text-lg">{title}</CardTitle>
                               <CardDescription className="flex items-center gap-1.5 sm:gap-2 mt-1 text-xs sm:text-sm">
                                 <Calendar className="h-3 w-3 flex-shrink-0" />
-                                <span className="truncate">{formatDate(item.created_at)}</span>
+                                <span className="truncate">{formatDate(item.created_at)} • {dur}s</span>
                               </CardDescription>
                             </div>
                           </div>
@@ -136,42 +222,47 @@ export default function History() {
                             </Badge>
                           </div>
                         </div>
+                        {thumb && (
+                          <img src={thumb} alt="thumbnail" className="w-full max-w-sm rounded-md border border-border" />
+                        )}
                         <Button
                           size="sm"
-                          onClick={() => navigate(`/${item.module}`)}
+                          onClick={() => {
+                            const vid = v?.id || item.job_id;
+                            // console.log("vid", item);
+                            if (vid) navigate(`/video/${vid}?q=${encodeURIComponent(item.query || '')}`);
+                          }}
                           className="gradient-primary w-full sm:w-auto"
                         >
                           <Play className="h-4 w-4 mr-1" />
-                          <span>Open Module</span>
+                          <span>Open Video</span>
                         </Button>
+                        {/* <Button
+                          size="sm"
+                          variant="outline"
+                          onClick={() => {
+                            if (!v?.video_url) return;
+                            // video_url is absolute path e.g. D:\...\uploads\file.mp4
+                            // We want path="uploads/file.mp4"
+                            const filename = v.video_url.split(/[/\\]/).pop();
+                            if (!filename) return;
+
+                            const downloadUrl = `${import.meta.env.VITE_API_BASE_URL || 'http://localhost:8040'}/download?path=uploads/${filename}`;
+                            window.open(downloadUrl, '_blank');
+                          }}
+                          className="w-full sm:w-auto"
+                        >
+                          <Download className="h-4 w-4 mr-1" />
+                          <span>Download</span>
+                        </Button> */}
                       </div>
                     </CardHeader>
                     <CardContent className="p-4 sm:p-6 pt-0">
                       <div className="space-y-2 text-xs sm:text-sm">
-                        {item.input_url && (
-                          <p className="text-muted-foreground break-all">
-                            <span className="font-medium">Input:</span> {item.input_url}
-                          </p>
-                        )}
                         {item.query && (
                           <p className="text-muted-foreground line-clamp-2">
                             <span className="font-medium">Query:</span> {item.query}
                           </p>
-                        )}
-                        {item.module === 'compression' && item.original_size && (
-                          <div className="flex flex-col sm:flex-row sm:flex-wrap gap-2">
-                            <p className="text-muted-foreground">
-                              <span className="font-medium">Original:</span>{' '}
-                              {(item.original_size / 1024 / 1024).toFixed(2)} MB
-                            </p>
-                            <p className="text-muted-foreground">
-                              <span className="font-medium">Compressed:</span>{' '}
-                              {(item.processed_size / 1024 / 1024).toFixed(2)} MB
-                            </p>
-                            <p className="text-accent font-medium">
-                              {Math.round(((item.original_size - item.processed_size) / item.original_size) * 100)}% reduction
-                            </p>
-                          </div>
                         )}
                       </div>
                     </CardContent>
@@ -181,6 +272,7 @@ export default function History() {
             })}
           </div>
         )}
+
       </motion.div>
     </DashboardLayout>
   );

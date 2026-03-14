@@ -49,15 +49,15 @@ class CustomNeuroClip(nn.Module):
     def __init__(self, embed_dim=256):
         super(CustomNeuroClip, self).__init__()
         
-        # Image Encoder
+        # Image Encoder - Use ResNet18 for faster CPU inference
         try:
-            weights = models.ResNet50_Weights.IMAGENET1K_V1
-            resnet = models.resnet50(weights=weights)
+            weights = models.ResNet18_Weights.IMAGENET1K_V1
+            resnet = models.resnet18(weights=weights)
         except:
-            resnet = models.resnet50(pretrained=True)
+            resnet = models.resnet18(pretrained=True)
             
         self.image_encoder = nn.Sequential(*list(resnet.children())[:-1])
-        self.image_projection = nn.Linear(2048, embed_dim)
+        self.image_projection = nn.Linear(512, embed_dim)
         
         # Text Encoder
         self.text_encoder = DistilBertModel.from_pretrained("distilbert-base-uncased")
@@ -121,8 +121,8 @@ def extract_high_value_frames(video_path, output_dir, model, threshold=CONFIDENC
     
     transform = get_transforms()
     
-    # Process 1 frame per second
-    frame_interval = int(fps) 
+    # Process 1 frame every 2 seconds (faster on CPU)
+    frame_interval = int(fps * 2.0) 
     current_frame = 0
     saved_count = 0
     

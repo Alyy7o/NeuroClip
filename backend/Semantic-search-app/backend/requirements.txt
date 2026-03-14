@@ -55,3 +55,4 @@ easyocr
 opencv-python-headless
 spaces
 gradio
+pyngrok

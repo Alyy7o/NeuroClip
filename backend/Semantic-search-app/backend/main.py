@@ -72,10 +72,11 @@ os.environ.setdefault("SENTENCE_TRANSFORMERS_HOME", DEFAULT_CACHE)
 def get_model():
     global model
     if model is None:
+        device = "cuda" if torch.cuda.is_available() else "cpu"
         if EMBEDDING_BACKEND == "sentence":
             try:
                 from sentence_transformers import SentenceTransformer
-                model = SentenceTransformer(EMBEDDING_MODEL_NAME)
+                model = SentenceTransformer(EMBEDDING_MODEL_NAME, device=device)
             except Exception:
                 raise HTTPException(status_code=500, detail="sentence-transformers unavailable; set EMBEDDING_BACKEND=openclip")
         elif EMBEDDING_BACKEND == "openclip":
@@ -83,19 +84,21 @@ def get_model():
                 import open_clip
                 import torch
                 class _OpenClipEncoder:
-                    def __init__(self):
+                    def __init__(self, device):
+                        self.device = device
                         self.model, _, self.preprocess = open_clip.create_model_and_transforms(
                             'ViT-B-32', pretrained='laion2b_s34b_b79k'
                         )
                         self.tokenizer = open_clip.get_tokenizer('ViT-B-32')
+                        self.model.to(self.device)
                         self.model.eval()
                     def encode(self, texts):
                         with torch.no_grad():
-                            tokens = self.tokenizer(texts)
+                            tokens = self.tokenizer(texts).to(self.device)
                             feats = self.model.encode_text(tokens)
                             feats = feats / (feats.norm(dim=-1, keepdim=True) + 1e-9)
                             return feats.cpu().numpy().tolist()
-                model = _OpenClipEncoder()
+                model = _OpenClipEncoder(device)
             except Exception:
                 raise HTTPException(status_code=500, detail="open-clip-torch unavailable; set EMBEDDING_BACKEND=sentence")
         else:
@@ -1791,22 +1794,41 @@ async def compress_video(
             raise HTTPException(status_code=500, detail="FFmpeg not found on server")
 
     # Optimized Command for Speed:
-    # - H.265 is kept for good compression, but preset changed to 'fast' (much faster than 'slow').
-    # - CRF raised slightly to 28 (very acceptable for 720p web video) to speed up encode & reduce size.
-    # - 'threads 0' ensures we use all available CPU cores.
+    # - H.264 for universal browser compatibility.
+    # - GPU Acceleration: Use h264_nvenc if an NVIDIA GPU is detected.
+    has_gpu = False
+    try:
+        import torch
+        has_gpu = torch.cuda.is_available()
+    except:
+        pass
+
+    v_encoder = "h264_nvenc" if has_gpu else "libx264"
+    
     cmd = [
         ff, "-y",
         "-i", str(input_path),
         "-vf", "scale=1280:-2",
-        "-c:v", "libx265",
-        "-crf", "28",
-        "-preset", "fast",
+        "-c:v", v_encoder,
+        "-preset", "p3" if has_gpu else "fast", # 'p3' is a fast NVENC preset
         "-threads", "0",
         "-c:a", "aac",
         "-b:a", "128k",
         "-movflags", "+faststart",
         str(output_path)
     ]
+    
+    # CRF is not supported by nvenc in the same way, we use -rc vbr or similar for nvenc
+    if not has_gpu:
+        # Add CRF for libx264
+        cmd.insert(cmd.index("-c:v")+2, "-crf")
+        cmd.insert(cmd.index("-crf")+1, "26")
+    else:
+        # Add cq for nvenc
+        cmd.insert(cmd.index("-c:v")+2, "-cq")
+        cmd.insert(cmd.index("-cq")+1, "28")
+        cmd.insert(cmd.index("-cq")+2, "-rc")
+        cmd.insert(cmd.index("-rc")+1, "vbr")
 
     start_time = time.time()
     try:

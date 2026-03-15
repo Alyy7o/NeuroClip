@@ -21,6 +21,7 @@ from pathlib import Path
 # CONFIGURATION
 # ====================
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+print(f"--- [NeuroClip OCR] Using device: {DEVICE.upper()} ---")
 CONFIDENCE_THRESHOLD = 0.40
 DUPLICATE_THRESHOLD = 0.85
 MIN_SLIDE_INTERVAL = 5.0

@@ -98,6 +98,7 @@ export default function Compression() {
       const originalSize = data.original_size;
       const compressedSize = data.compressed_size;
       const reduction = data.reduction;
+      const durationSeconds = data.duration_seconds;
       const processedVideoUrl = `${API_BASE}${data.url}`;
 
       setResult({
@@ -105,7 +106,9 @@ export default function Compression() {
         originalSize,
         compressedSize,
         reduction: reduction,
-        explanation: `Your video has been successfully compressed using advanced H.265 (HEVC) encoding technology.
+        durationSeconds: durationSeconds,
+        explanation: `Your video has been successfully compressed using advanced H.264 (AVC) encoding technology.
+${data.duration_seconds ? `\n**Compression took:** ${data.duration_seconds} seconds` : ''}
 
 **Compression Statistics:**
 - Original size: ${formatFileSize(originalSize)}
@@ -113,12 +116,12 @@ export default function Compression() {
 - Size reduction: ${reduction}%
 
 **Technical Details:**
-- Codec: H.265/HEVC (libx265)
+- Codec: H.264/AVC (h264_nvenc Accelerated)
 - Resolution: Max 720p (scaled)
-- Quality Control: CRF 28 (Fast Preset)
+- Quality Control: CRF 26 / CQ 28
 - Audio: AAC compression (128k)
 
-The compression algorithm intelligently scales the video down to 720p and optimizes the bitrate using Constant Rate Factor (CRF) encoding. We use a 'fast' hardware-optimized preset to drastically reduce processing time while still achieving massive file size reductions.`,
+The compression algorithm intelligently scales the video down to 720p and optimizes the bitrate. We use hardware-optimized acceleration to drastically reduce processing time while still achieving massive file size reductions.`,
         duration: timeRange.end - timeRange.start,
         originalDuration: timeRange.end,
       });
@@ -215,8 +218,13 @@ The compression algorithm intelligently scales the video down to 720p and optimi
             <Card className="gradient-card border-border/50">
               <CardHeader>
                 <CardTitle>Compressed Video</CardTitle>
-                <CardDescription>
-                  Duration: {result?.duration?.toFixed(1)}s
+                <CardDescription className="flex flex-col gap-1">
+                  <span>Video length: {result?.duration?.toFixed(1)}s</span>
+                  {result?.durationSeconds && (
+                    <span className="text-primary font-medium">
+                      Compression time: {result.durationSeconds.toFixed(1)}s
+                    </span>
+                  )}
                 </CardDescription>
               </CardHeader>
               <CardContent className="space-y-6">

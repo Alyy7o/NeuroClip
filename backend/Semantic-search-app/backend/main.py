@@ -1,87 +1,64 @@
-from fastapi import FastAPI
-from fastapi import HTTPException
-from fastapi import UploadFile, File, Form
+import os
+import sys
+import shutil
+import uuid
+import json
+import re
+import time
+import requests
+import assemblyai as aai
+from pathlib import Path
+from typing import Optional
+from pydantic import BaseModel
+from fastapi import FastAPI, HTTPException, UploadFile, File, Form
 from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-import json
-import re
+
+# --- Path Definitions ---
+BASE_DIR = Path(__file__).resolve().parent
+REPO_ROOT = BASE_DIR.parents[1]
+
+# --- App Initialization ---
+app = FastAPI()
+
+# --- Module Imports with Path Fixes ---
 try:
-    from supabase import create_client, Client
-except Exception:
-    create_client = None
-    Client = None
-import os
-import shutil
-import uuid
-import assemblyai as aai
-import requests
-from pathlib import Path
-import time
-from typing import Optional
-from pydantic import BaseModel
-import yt_dlp
-try:
-    # Attempt to import the AssemblyAI helper from the repo root 'backend' folder
     from assemblyai_utils import generate_transcript_from_video
-except Exception:
-    # Add repo root 'backend' directory to sys.path so we can import assemblyai_utils
-    sys.path.append(str(OUTPUT_ROOT))
+except ImportError:
+    if str(REPO_ROOT) not in sys.path:
+        sys.path.append(str(REPO_ROOT))
     from assemblyai_utils import generate_transcript_from_video
 
 try:
     from ocr_utils import load_ocr_model, extract_high_value_frames, run_ocr_on_frames
 except ImportError:
-    import sys
-    sys.path.append(os.path.dirname(__file__))
+    if str(BASE_DIR) not in sys.path:
+        sys.path.append(str(BASE_DIR))
     from ocr_utils import load_ocr_model, extract_high_value_frames, run_ocr_on_frames
 
-env_loaded = False
+try:
+    from supabase import create_client, Client
+except Exception:
+    create_client = None
+    Client = None
+
+# --- Environment Variables ---
 try:
     from dotenv import load_dotenv
-    candidates = [
-        Path(__file__).resolve().parent.parent / ".env",
-        Path(__file__).resolve().parents[2] / ".env",
-    ]
-    for p in candidates:
-        try:
-            if p.exists():
-                load_dotenv(dotenv_path=str(p))
-                env_loaded = True
-                break
-        except Exception:
-            continue
-except Exception:
-    env_loaded = False
-if not env_loaded:
-    for p in [Path(__file__).resolve().parent.parent / ".env", Path(__file__).resolve().parents[2] / ".env"]:
-        try:
-            if p.exists():
-                for line in p.read_text(encoding="utf-8", errors="replace").splitlines():
-                    s = line.strip()
-                    if not s or s.startswith("#"):
-                        continue
-                    if "=" in s:
-                        k, v = s.split("=", 1)
-                        k = k.strip()
-                        v = v.strip().strip('"').strip("'")
-                        if k and v and k not in os.environ:
-                            os.environ[k] = v
-                break
-        except Exception:
-            continue
-
-# Define BASE_DIR for the backend (Semantic-search-app/backend)
-BASE_DIR = Path(__file__).resolve().parent
-# Define REPO_ROOT (the root 'backend' folder where assemblyai_utils.py lives)
-REPO_ROOT = BASE_DIR.resolve().parents[1] # 2 levels up: Semantic-search-app/backend -> Semantic-search-app -> backend
+    # Load .env from backend root or app root
+    for p in [REPO_ROOT / ".env", BASE_DIR.parent / ".env"]:
+        if p.exists():
+            load_dotenv(str(p))
+            break
+except ImportError:
+    pass
 
 # Ensure required directories exist for StaticFiles
 (REPO_ROOT / "uploads").mkdir(parents=True, exist_ok=True)
 (REPO_ROOT / "output_data").mkdir(parents=True, exist_ok=True)
 (REPO_ROOT / "input_files").mkdir(parents=True, exist_ok=True)
 
-app = FastAPI()
 # Lazily initialize the embedding model to avoid heavy startup
 model = None
 EMBEDDING_BACKEND = os.getenv("EMBEDDING_BACKEND", "sentence").lower()
@@ -192,8 +169,8 @@ def download_file(path: str):
     # We resolve paths relative to the backend parent directory (the repo root context we used elsewhere)
     
     # Base roots
-    base_uploads = Path(__file__).resolve().parent / "uploads"
-    base_output = Path(__file__).resolve().parents[2] / "backend" / "output_data"
+    base_uploads = REPO_ROOT / "uploads"
+    base_output = REPO_ROOT / "output_data"
     
     target_file = None
     
@@ -204,9 +181,6 @@ def download_file(path: str):
         target_file = base_uploads / filename
     elif path.startswith("clips/"):
         # e.g. clips/job_id/clip_01.mp4 
-        # Note: 'clips' is inside 'output_data', so we strip nothing if we join with base_output?
-        # Re-reading clips_search: clips_dir = out_dir / "clips" ...
-        # so path 'clips/...' matches structure inside base_output
         target_file = base_output / path
     else:
         # Fallback: check if it matches a direct file in output_data (like srt)

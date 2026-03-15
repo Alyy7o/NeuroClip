@@ -20,8 +20,17 @@ from pathlib import Path
 # ====================
 # CONFIGURATION
 # ====================
-DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-print(f"--- [NeuroClip OCR] Using device: {DEVICE.upper()} ---")
+DEVICE = "cuda:0" if torch.cuda.is_available() else "cpu"
+if DEVICE == "cuda:0":
+    try:
+        torch.cuda.set_device(0)
+        # Flush CUDA memory to ensure T4 is ready
+        torch.cuda.empty_cache()
+    except Exception as e:
+        print(f"--- [GPU] CUDA initialization failed: {e} ---")
+        DEVICE = "cpu"
+
+print(f"--- [NeuroClip OCR] ACTIVE DEVICE: {DEVICE.upper()} ---")
 CONFIDENCE_THRESHOLD = 0.40
 DUPLICATE_THRESHOLD = 0.85
 MIN_SLIDE_INTERVAL = 5.0

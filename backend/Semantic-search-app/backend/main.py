@@ -72,6 +72,15 @@ if not env_loaded:
         except Exception:
             continue
 
+# Define BASE_DIR for the backend
+BASE_DIR = Path(__file__).resolve().parent
+# Define output root (2 levels up -> backend)
+OUTPUT_ROOT = BASE_DIR.parents[1]
+
+# Ensure required directories exist for StaticFiles
+(BASE_DIR / "uploads").mkdir(parents=True, exist_ok=True)
+(OUTPUT_ROOT / "output_data").mkdir(parents=True, exist_ok=True)
+
 app = FastAPI()
 # Lazily initialize the embedding model to avoid heavy startup
 model = None
@@ -160,13 +169,13 @@ app.add_middleware(
 
 app.mount(
     "/static",
-    StaticFiles(directory=str(Path(__file__).resolve().parents[2] / "backend" / "output_data")),
+    StaticFiles(directory=str(OUTPUT_ROOT / "output_data")),
     name="static",
 )
 
 app.mount(
     "/uploads",
-    StaticFiles(directory=str(Path(__file__).resolve().parent / "uploads")),
+    StaticFiles(directory=str(BASE_DIR / "uploads")),
     name="uploads",
 )
 

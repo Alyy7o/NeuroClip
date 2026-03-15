@@ -107,7 +107,7 @@ export default function Compression() {
         compressedSize,
         reduction: reduction,
         durationSeconds: durationSeconds,
-        explanation: `Your video has been successfully compressed using advanced H.264 (AVC) encoding technology.
+        explanation: `Your video has been successfully compressed using advanced H.265 (HEVC) encoding technology.
 ${data.duration_seconds ? `\n**Compression took:** ${data.duration_seconds} seconds` : ''}
 
 **Compression Statistics:**
@@ -116,12 +116,12 @@ ${data.duration_seconds ? `\n**Compression took:** ${data.duration_seconds} seco
 - Size reduction: ${reduction}%
 
 **Technical Details:**
-- Codec: H.264/AVC (h264_nvenc Accelerated)
+- Codec: H.265/HEVC (GPU Accelerated)
 - Resolution: Max 720p (scaled)
-- Quality Control: CRF 26 / CQ 28
+- Quality Control: CQ 28 (Constant Quality)
 - Audio: AAC compression (128k)
 
-The compression algorithm intelligently scales the video down to 720p and optimizes the bitrate. We use hardware-optimized acceleration to drastically reduce processing time while still achieving massive file size reductions.`,
+The compression algorithm intelligently scales the video down to 720p and optimizes the bitrate using high-efficiency HEVC encoding. We use hardware-optimized acceleration to drastically reduce processing time while achieving superior file size reductions.`,
         duration: timeRange.end - timeRange.start,
         originalDuration: timeRange.end,
       });
@@ -228,7 +228,6 @@ The compression algorithm intelligently scales the video down to 720p and optimi
                 </CardDescription>
               </CardHeader>
               <CardContent className="space-y-6">
-                <VideoPlayer videoUrl={result?.processedVideoUrl} />
 
                 <div className="flex flex-col sm:flex-row gap-3">
                   <Button className="flex-1 gradient-primary" size="lg" onClick={() => {

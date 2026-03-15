@@ -1795,61 +1795,53 @@ async def compress_video(
 
     # --- Robust GPU Detection ---
     has_gpu = False
-    v_encoder = "libx264"
+    v_encoder = "libx265"
     try:
         # 1. Check if nvidia-smi exists (Kaggle/NVIDIA specific)
         import subprocess
         gpu_check = subprocess.run(["nvidia-smi"], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         if gpu_check.returncode == 0:
-            # 2. Check if ffmpeg supports nvenc
+            # 2. Check if ffmpeg supports hevc_nvenc
             codec_check = subprocess.run([ff, "-encoders"], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-            if b"h264_nvenc" in codec_check.stdout:
+            if b"hevc_nvenc" in codec_check.stdout:
                 has_gpu = True
-                v_encoder = "h264_nvenc"
-                print("--- [GPU] NVIDIA NVENC detected and enabled. ---")
+                v_encoder = "hevc_nvenc"
+                print("--- [GPU] NVIDIA HEVC NVENC detected and enabled. ---")
     except Exception as e:
         print(f"--- [GPU] Detection failed, falling back to CPU: {e} ---")
 
     if not has_gpu:
-        print("--- [CPU] Using libx264 (CPU encoding). ---")
+        print("--- [CPU] Using libx265 (CPU encoding). ---")
 
     # Command optimized for: 
-    # 1. Browser Playback (-pix_fmt yuv420p)
-    # 2. Size Control (-rc vbr, bitrate limits)
-    # 3. GPU Speed (h264_nvenc)
+    # 1. Compression Efficiency (H.265 / HEVC)
+    # 2. GPU Speed (hevc_nvenc)
     
     cmd = [
         ff, "-y",
         "-i", str(input_path),
         "-vf", "scale=1280:-2",
         "-c:v", v_encoder,
-        "-pix_fmt", "yuv420p",        # CRITICAL: Fixes black screen in browsers
-        "-profile:v", "high",        # Ensures better compatibility/efficiency
         "-preset", "p3" if has_gpu else "fast",
         "-threads", "0",
         "-c:a", "aac",
         "-b:a", "128k",
-        "-movflags", "+faststart",    # Enables playback while downloading
+        "-movflags", "+faststart",
         str(output_path)
     ]
     
     if has_gpu:
-        # NVENC strict bitrate control to prevent size bloat
+        # HEVC NVENC quality control
         cmd.extend([
             "-rc", "vbr",
             "-cq", "28",
-            "-b:v", "2M",             # Target 2Mbps (good for 720p)
-            "-maxrate", "4M",         # CAP the bitrate to prevent massive files
-            "-bufsize", "8M",
-            "-qmin", "24",            # Prevent overly high quality/size
-            "-qmax", "34"             # Prevent overly poor quality
+            "-qmin", "24",
+            "-qmax", "34"
         ])
     else:
-        # CPU (libx264) bitrate control
+        # CPU (libx265) quality control
         cmd.extend([
-            "-crf", "26",
-            "-maxrate", "3M",
-            "-bufsize", "6M"
+            "-crf", "28"
         ])
 
     start_time = time.time()
@@ -1876,7 +1868,7 @@ async def compress_video(
                 "module": "compression",
                 "input_type": "file",
                 "input_url": safe_name,
-                "query": f"H.264 / {'NVENC' if has_gpu else 'CPU'} / 720p / Duration: {duration:.2f}s",
+                "query": f"H.265 / {'HEVC_NVENC' if has_gpu else 'LIBX265'} / 720p / Duration: {duration:.2f}s",
                 "status": "completed",
             }).execute()
         except Exception as e:

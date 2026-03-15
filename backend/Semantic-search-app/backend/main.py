@@ -25,9 +25,8 @@ try:
     # Attempt to import the AssemblyAI helper from the repo root 'backend' folder
     from assemblyai_utils import generate_transcript_from_video
 except Exception:
-    import sys
     # Add repo root 'backend' directory to sys.path so we can import assemblyai_utils
-    sys.path.append(str(Path(__file__).resolve().parents[2]))
+    sys.path.append(str(OUTPUT_ROOT))
     from assemblyai_utils import generate_transcript_from_video
 
 try:
@@ -72,14 +71,15 @@ if not env_loaded:
         except Exception:
             continue
 
-# Define BASE_DIR for the backend
+# Define BASE_DIR for the backend (Semantic-search-app/backend)
 BASE_DIR = Path(__file__).resolve().parent
-# Define output root (2 levels up -> backend)
-OUTPUT_ROOT = BASE_DIR.parents[1]
+# Define REPO_ROOT (the root 'backend' folder where assemblyai_utils.py lives)
+REPO_ROOT = BASE_DIR.resolve().parents[1] # 2 levels up: Semantic-search-app/backend -> Semantic-search-app -> backend
 
 # Ensure required directories exist for StaticFiles
-(BASE_DIR / "uploads").mkdir(parents=True, exist_ok=True)
-(OUTPUT_ROOT / "output_data").mkdir(parents=True, exist_ok=True)
+(REPO_ROOT / "uploads").mkdir(parents=True, exist_ok=True)
+(REPO_ROOT / "output_data").mkdir(parents=True, exist_ok=True)
+(REPO_ROOT / "input_files").mkdir(parents=True, exist_ok=True)
 
 app = FastAPI()
 # Lazily initialize the embedding model to avoid heavy startup
@@ -87,7 +87,7 @@ model = None
 EMBEDDING_BACKEND = os.getenv("EMBEDDING_BACKEND", "sentence").lower()
 EMBEDDING_MODEL_NAME = os.getenv("EMBEDDING_MODEL_NAME", "sentence-transformers/all-MiniLM-L6-v2")
 # Ensure model caches persist so weights are downloaded once
-DEFAULT_CACHE = str(Path(__file__).resolve().parents[2] / "backend" / ".cache")
+DEFAULT_CACHE = str(REPO_ROOT / ".cache")
 os.environ.setdefault("HF_HOME", DEFAULT_CACHE)
 os.environ.setdefault("TRANSFORMERS_CACHE", DEFAULT_CACHE)
 os.environ.setdefault("SENTENCE_TRANSFORMERS_HOME", DEFAULT_CACHE)
@@ -169,13 +169,13 @@ app.add_middleware(
 
 app.mount(
     "/static",
-    StaticFiles(directory=str(OUTPUT_ROOT / "output_data")),
+    StaticFiles(directory=str(REPO_ROOT / "output_data")),
     name="static",
 )
 
 app.mount(
     "/uploads",
-    StaticFiles(directory=str(BASE_DIR / "uploads")),
+    StaticFiles(directory=str(REPO_ROOT / "uploads")),
     name="uploads",
 )
 
@@ -308,7 +308,7 @@ class TranscribeURLRequest(BaseModel):
 def transcribe_url(payload: TranscribeURLRequest):
     out_path = None
     if payload.save_srt:
-        out_dir = Path(__file__).resolve().parents[2] / "backend" / "output_data"
+        out_dir = REPO_ROOT / "output_data"
         out_dir.mkdir(parents=True, exist_ok=True)
         fname = payload.srt_filename or "AssemblyAI_transcript.srt"
         out_path = out_dir / fname
@@ -378,7 +378,7 @@ async def transcribe_file(
     save_srt: bool = Form(False),
     srt_filename: Optional[str] = Form(None),
 ):
-    temp_dir = Path(__file__).resolve().parents[2] / "backend" / "input_files"
+    temp_dir = REPO_ROOT / "input_files"
     temp_dir.mkdir(parents=True, exist_ok=True)
     temp_path = temp_dir / f"transcribe_{uuid.uuid4()}_{file.filename}"
 
@@ -387,7 +387,7 @@ async def transcribe_file(
 
     out_path = None
     if save_srt:
-        out_dir = Path(__file__).resolve().parents[2] / "backend" / "output_data"
+        out_dir = REPO_ROOT / "output_data"
         out_dir.mkdir(parents=True, exist_ok=True)
         fname = srt_filename or (Path(file.filename).stem + ".srt")
         out_path = out_dir / fname
@@ -484,13 +484,12 @@ def process_video_workflow(
     3. Generate Embeddings
     4. Save to Database (Supabase)
     """
-    output_dir = Path(__file__).resolve().parents[2] / "backend" / "output_data"
+    output_dir = REPO_ROOT / "output_data"
     output_dir.mkdir(parents=True, exist_ok=True)
     
-    # 0. High-Value Frame Extraction and OCR
-    ocr_text_data = []
     try:
-        model_path = Path(__file__).resolve().parents[2] / "custom_model_training" / "neuroclip_v1.pth"
+        # custom_model_training is in the NeuroClip root (one level up from REPO_ROOT)
+        model_path = REPO_ROOT.parent / "custom_model_training" / "neuroclip_v1.pth"
         ocr_model = load_ocr_model(str(model_path))
         if ocr_model:
             frames_dir = output_dir / "frames" / job_id
@@ -1787,11 +1786,10 @@ async def compress_video(
     """
     import subprocess
     try:
-        base_dir = Path(os.getenv("APP_BASE_DIR") or Path(__file__).resolve().parent)
-        uploads_dir = base_dir / "uploads"
+        uploads_dir = REPO_ROOT / "uploads"
         uploads_dir.mkdir(parents=True, exist_ok=True)
         
-        output_dir = Path(__file__).resolve().parents[2] / "backend" / "output_data" / "compressed"
+        output_dir = REPO_ROOT / "output_data" / "compressed"
         output_dir.mkdir(parents=True, exist_ok=True)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Directory setup failed: {e}")
@@ -1836,11 +1834,13 @@ async def compress_video(
         str(output_path)
     ]
 
+    start_time = time.time()
     try:
         subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     except subprocess.CalledProcessError as e:
         err_out = e.stderr.decode('utf-8') if e.stderr else str(e)
         raise HTTPException(status_code=500, detail=f"Compression failed: {err_out}")
+    duration = time.time() - start_time
 
     if not output_path.exists() or output_path.stat().st_size == 0:
         raise HTTPException(status_code=500, detail="Compression resulted in empty file")
@@ -1858,20 +1858,21 @@ async def compress_video(
                 "module": "compression",
                 "input_type": "file",
                 "input_url": safe_name,
-                "query": "H.265 / 720p / CRF 26",
+                "query": f"H.265 / 720p / CRF 28 / Duration: {duration:.2f}s",
                 "status": "completed",
             }).execute()
         except Exception as e:
             print("History save failed:", e)
 
     # Calculate relative URL for frontend
-    rel_path = output_path.relative_to(Path(__file__).resolve().parents[2] / "backend" / "output_data")
+    rel_path = output_path.relative_to(REPO_ROOT / "output_data")
     
     return {
         "job_id": job_id,
         "original_size": original_size,
         "compressed_size": compressed_size,
         "reduction": round(reduction, 2),
+        "duration_seconds": round(duration, 2),
         "url": f"/static/{rel_path.as_posix()}"
     }
 

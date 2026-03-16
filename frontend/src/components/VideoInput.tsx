@@ -11,11 +11,12 @@ interface VideoInputProps {
   onFileSelect: (file: File) => void;
   onUrlSubmit: (url: string) => void;
   file: File | null;
-  url: string;
+  url?: string;
   disabled?: boolean;
+  hideUrl?: boolean;
 }
 
-export function VideoInput({ onFileSelect, onUrlSubmit, file, url, disabled }: VideoInputProps) {
+export function VideoInput({ onFileSelect, onUrlSubmit, file, url = '', disabled, hideUrl }: VideoInputProps) {
   const [dragActive, setDragActive] = useState(false);
   const [inputUrl, setInputUrl] = useState(url);
 
@@ -57,9 +58,9 @@ export function VideoInput({ onFileSelect, onUrlSubmit, file, url, disabled }: V
 
   return (
     <Tabs defaultValue="upload" className="w-full">
-      <TabsList className="grid w-full grid-cols-2">
+      <TabsList className={`grid w-full ${hideUrl ? 'grid-cols-1' : 'grid-cols-2'}`}>
         <TabsTrigger value="upload">Upload File</TabsTrigger>
-        <TabsTrigger value="url">Video URL</TabsTrigger>
+        {!hideUrl && <TabsTrigger value="url">Video URL</TabsTrigger>}
       </TabsList>
 
       <TabsContent value="upload">
@@ -130,41 +131,43 @@ export function VideoInput({ onFileSelect, onUrlSubmit, file, url, disabled }: V
         </Card>
       </TabsContent>
 
-      <TabsContent value="url">
-        <Card className="p-6">
-          <form onSubmit={handleUrlSubmit} className="space-y-4">
-            <div className="space-y-2">
-              <Label htmlFor="video-url">Video URL</Label>
-              <div className="flex gap-2">
-                <div className="relative flex-1">
-                  <Link2 className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
-                  <Input
-                    id="video-url"
-                    type="url"
-                    placeholder="https://youtube.com/watch?v=..."
-                    value={inputUrl}
-                    onChange={(e) => setInputUrl(e.target.value)}
-                    onKeyDown={(e) => {
-                      if (e.key === 'Enter') {
-                        e.preventDefault();
-                        handleUrlSubmit();
-                      }
-                    }}
-                    disabled={disabled}
-                    className="pl-10"
-                  />
+      {!hideUrl && (
+        <TabsContent value="url">
+          <Card className="p-6">
+            <form onSubmit={handleUrlSubmit} className="space-y-4">
+              <div className="space-y-2">
+                <Label htmlFor="video-url">Video URL</Label>
+                <div className="flex gap-2">
+                  <div className="relative flex-1">
+                    <Link2 className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
+                    <Input
+                      id="video-url"
+                      type="url"
+                      placeholder="https://youtube.com/watch?v=..."
+                      value={inputUrl}
+                      onChange={(e) => setInputUrl(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter') {
+                          e.preventDefault();
+                          handleUrlSubmit();
+                        }
+                      }}
+                      disabled={disabled}
+                      className="pl-10"
+                    />
+                  </div>
+                  <Button type="button" onClick={handleUrlSubmit} disabled={disabled || !inputUrl.trim()}>
+                    Load
+                  </Button>
                 </div>
-                <Button type="button" onClick={handleUrlSubmit} disabled={disabled || !inputUrl.trim()}>
-                  Load
-                </Button>
               </div>
-            </div>
-            <p className="text-xs text-muted-foreground">
-              Supports YouTube, Vimeo, and direct video links
-            </p>
-          </form>
-        </Card>
-      </TabsContent>
+              <p className="text-xs text-muted-foreground">
+                Supports YouTube, Vimeo, and direct video links
+              </p>
+            </form>
+          </Card>
+        </TabsContent>
+      )}
     </Tabs>
   );
 }

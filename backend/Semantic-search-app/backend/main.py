@@ -1811,6 +1811,36 @@ async def compress_video(
         raise HTTPException(status_code=500, detail=f"File save failed: {e}")
 
     original_size = input_path.stat().st_size
+    
+    # --- Duration Extraction (ffprobe) ---
+    probe_duration = 0.0
+    try:
+        # Check for ffprobe
+        fp = shutil.which("ffprobe")
+        if not fp:
+            try:
+                import imageio_ffmpeg
+                # imageio_ffmpeg might provide ffprobe too if we find the binary in the same dir
+                fp_path = Path(imageio_ffmpeg.get_ffmpeg_exe())
+                fp = str(fp_path.parent / "ffprobe")
+                if os.name == 'nt': fp += ".exe"
+                if not Path(fp).exists(): fp = None
+            except:
+                fp = None
+
+        if fp:
+            # -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1
+            probe_cmd = [
+                fp, "-v", "error", 
+                "-show_entries", "format=duration", 
+                "-of", "default=noprint_wrappers=1:nokey=1", 
+                str(input_path)
+            ]
+            p_res = subprocess.run(probe_cmd, capture_output=True, text=True)
+            if p_res.returncode == 0:
+                probe_duration = float(p_res.stdout.strip())
+    except Exception as e:
+        print(f"ffprobe duration extraction failed: {e}")
 
     # -------------------------------------------------------------------------
     # 3. Locate FFmpeg
@@ -1935,26 +1965,44 @@ async def compress_video(
     )
 
     # -------------------------------------------------------------------------
-    # 8. Save to Processing History
+    # 8. Save to Processing History & Video Metadata
     # -------------------------------------------------------------------------
-    if user_id and supabase is not None:
+    if supabase is not None:
         try:
-            supabase.table("processing_history").insert({
-                "user_id":    user_id,
-                "job_id":     job_id,
-                "video_id":   job_id,
-                "module":     "compression",
-                "input_type": "file",
-                "input_url":  safe_name,
-                "query":      (
-                    f"H.265 / {mode_label} / 720p / "
-                    f"Duration: {duration:.2f}s / "
-                    f"Reduction: {reduction:.1f}%"
-                ),
-                "status": "completed",
+            # A. processing_history (The job log)
+            if user_id:
+                supabase.table("processing_history").insert({
+                    "user_id":    user_id,
+                    "job_id":     job_id,
+                    "video_id":   job_id,
+                    "module":     "compression",
+                    "input_type": "file",
+                    "input_url":  safe_name,
+                    "query":      (
+                        f"H.265 / {mode_label} / 720p / "
+                        f"Total Proc: {duration:.2f}s / "
+                        f"Reduction: {reduction:.1f}%"
+                    ),
+                    "status": "completed",
+                }).execute()
+            
+            # B. video_embeddings (The metadata source for History.tsx and VideoClips.tsx)
+            # This allows the history page to show the title, duration, and direct video URL
+            rel_path = output_path.relative_to(REPO_ROOT / "output_data")
+            static_url = f"/static/{rel_path.as_posix()}"
+            
+            supabase.table("video_embeddings").insert({
+                "job_id":        job_id,
+                "video_url":     static_url,
+                "title":         safe_name,
+                "duration":      int(probe_duration),
+                "description":   f"Compressed via {mode_label}. Original size: {original_size}, Compressed: {compressed_size}",
+                "thumbnail_url": None,
+                "transcript":    None,
             }).execute()
+            
         except Exception as e:
-            print("History save failed:", e)
+            print("Supabase persistence failed for compression job:", e)
 
     # -------------------------------------------------------------------------
     # 9. Return Response

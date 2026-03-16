@@ -221,40 +221,70 @@ export default function History() {
                               {item.status}
                             </Badge>
                           </div>
-                        </div>
-                        {thumb && (
+                        </div>                        {thumb && (
                           <img src={thumb} alt="thumbnail" className="w-full max-w-sm rounded-md border border-border" />
                         )}
-                        <Button
-                          size="sm"
-                          onClick={() => {
-                            const vid = v?.id || item.job_id;
-                            // console.log("vid", item);
-                            if (vid) navigate(`/video/${vid}?q=${encodeURIComponent(item.query || '')}`);
-                          }}
-                          className="gradient-primary w-full sm:w-auto"
-                        >
-                          <Play className="h-4 w-4 mr-1" />
-                          <span>Open Video</span>
-                        </Button>
-                        {/* <Button
-                          size="sm"
-                          variant="outline"
-                          onClick={() => {
-                            if (!v?.video_url) return;
-                            // video_url is absolute path e.g. D:\...\uploads\file.mp4
-                            // We want path="uploads/file.mp4"
-                            const filename = v.video_url.split(/[/\\]/).pop();
-                            if (!filename) return;
+                        
+                        <div className="flex flex-col sm:flex-row gap-2">
+                          {item.module !== 'compression' ? (
+                            <Button
+                              size="sm"
+                              onClick={() => {
+                                const vid = v?.id || item.job_id;
+                                if (vid) navigate(`/video/${vid}?q=${encodeURIComponent(item.query || '')}`);
+                              }}
+                              className="gradient-primary w-full sm:w-auto"
+                            >
+                              <Play className="h-4 w-4 mr-1" />
+                              <span>Open Video</span>
+                            </Button>
+                          ) : (
+                            <Button
+                              size="sm"
+                              onClick={() => {
+                                if (!v?.video_url) return;
+                                const API_BASE = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8040';
+                                // If URL starts with /static, it's a relative path on the server
+                                const downloadUrl = v.video_url.startsWith('http') 
+                                  ? v.video_url 
+                                  : `${API_BASE}${v.video_url}`;
+                                
+                                const link = document.createElement('a');
+                                link.href = downloadUrl;
+                                link.download = v.video_url.split('/').pop() || 'video.mp4';
+                                link.target = '_blank';
+                                document.body.appendChild(link);
+                                link.click();
+                                document.body.removeChild(link);
+                              }}
+                              className="gradient-primary w-full sm:w-auto"
+                            >
+                              <Download className="h-4 w-4 mr-1" />
+                              <span>Download Video</span>
+                            </Button>
+                          )}
 
-                            const downloadUrl = `${import.meta.env.VITE_API_BASE_URL || 'http://localhost:8040'}/download?path=uploads/${filename}`;
-                            window.open(downloadUrl, '_blank');
-                          }}
-                          className="w-full sm:w-auto"
-                        >
-                          <Download className="h-4 w-4 mr-1" />
-                          <span>Download</span>
-                        </Button> */}
+                          {v?.video_url && item.module !== 'compression' && (
+                            <Button
+                              size="sm"
+                              variant="outline"
+                              onClick={() => {
+                                const API_BASE = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8040';
+                                const filename = v.video_url?.split(/[/\\]/).pop();
+                                if (!filename) return;
+                                
+                                // Guess path based on typical structure if not absolute
+                                const path = v.video_url?.includes('uploads') ? `uploads/${filename}` : `clips/${filename}`;
+                                const downloadUrl = `${API_BASE}/download?path=${path}`;
+                                window.open(downloadUrl, '_blank');
+                              }}
+                              className="w-full sm:w-auto"
+                            >
+                              <Download className="h-4 w-4 mr-1" />
+                              <span>Download</span>
+                            </Button>
+                          )}
+                        </div>
                       </div>
                     </CardHeader>
                     <CardContent className="p-4 sm:p-6 pt-0">

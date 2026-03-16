@@ -4,7 +4,6 @@ import { Minimize2, Play, Download, RotateCcw } from 'lucide-react';
 import { DashboardLayout } from '@/components/DashboardLayout';
 import { VideoInput } from '@/components/VideoInput';
 import { VideoPreview } from '@/components/VideoPreview';
-import { UrlVideoPreview } from '@/components/UrlVideoPreview';
 import { ProcessingLoader } from '@/components/ProcessingLoader';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
@@ -13,13 +12,6 @@ import { useAuth } from '@/contexts/AuthContext';
 import { z } from 'zod';
 
 const processingSchema = z.object({
-  url: z.string()
-    .trim()
-    .max(2048, { message: "URL too long" })
-    .optional()
-    .refine((val) => !val || val === '' || z.string().url().safeParse(val).success, {
-      message: "Invalid URL format"
-    }),
   fileName: z.string()
     .max(255, { message: "File name too long" })
     .optional()
@@ -27,7 +19,6 @@ const processingSchema = z.object({
 
 export default function Compression() {
   const [file, setFile] = useState<File | null>(null);
-  const [url, setUrl] = useState('');
   const [timeRange, setTimeRange] = useState({ start: 0, end: 0 });
   const [processing, setProcessing] = useState(false);
   const [currentStep, setCurrentStep] = useState(0);
@@ -39,8 +30,8 @@ export default function Compression() {
 
   const compressionSteps = [
     'Uploading video to server',
-    'Scanning for GPU acceleration',
-    'Compressing video (H.265/HEVC)',
+    'Scanning for acceleration',
+    'Compressing video',
     'Finalizing and saving results'
   ];
 
@@ -51,10 +42,10 @@ export default function Compression() {
   };
 
   const handleProcess = async () => {
-    if (!file && !url) {
+    if (!file) {
       toast({
         title: 'No video provided',
-        description: 'Please upload a video or provide a URL',
+        description: 'Please upload a video to compress',
         variant: 'destructive',
       });
       return;
@@ -69,8 +60,6 @@ export default function Compression() {
       const formData = new FormData();
       if (file) {
         formData.append('file', file);
-      } else {
-        throw new Error("URL compression not yet supported in this flow.");
       }
       if (user?.id) {
         formData.append('user_id', user.id);
@@ -137,22 +126,15 @@ export default function Compression() {
         compressedSize,
         reduction: reduction,
         durationSeconds: durationSeconds,
-        explanation: `Your video has been successfully compressed using advanced H.265 (HEVC) encoding technology.
-${data.duration_seconds ? `\n**Compression took:** ${data.duration_seconds} seconds` : ''}
+        explanation: `Your video has been successfully compressed using advanced encoding technology.
+${data.duration_seconds ? `\nCompression took: "${data.duration_seconds} seconds"` : ''}
 
-**Compression Statistics:**
+Compression Statistics:
+
 - Original size: ${formatFileSize(originalSize)}
 - Compressed size: ${formatFileSize(compressedSize)}
 - Size reduction: ${reduction.toFixed(2)}%
-
-**Technical Details:**
-- Codec: H.265/HEVC (GPU Accelerated)
-- Resolution: Max 720p (scaled)
-- Bitrate Target: 2Mbps (Capped)
-- Quality Control: CQ 28 (Constant Quality)
-- Audio: AAC compression (128k)
-
-The compression algorithm intelligently scales the video down to 720p and optimizes the bitrate using high-efficiency HEVC encoding with strict size caps. We use hardware-optimized acceleration to drastically reduce processing time while achieving superior file size reductions.`,
+`,
         duration: timeRange.end - timeRange.start,
         originalDuration: timeRange.end,
       });
@@ -178,7 +160,6 @@ The compression algorithm intelligently scales the video down to 720p and optimi
     setShowResults(false);
     setResult(null);
     setFile(null);
-    setUrl('');
   };
 
   return (
@@ -334,36 +315,19 @@ The compression algorithm intelligently scales the video down to 720p and optimi
                       onTimeRangeChange={(start, end) => setTimeRange({ start, end })}
                     />
                   </div>
-                ) : url ? (
-                  <div className="space-y-4">
-                    <div className="flex items-center justify-between">
-                      <p className="text-sm text-muted-foreground">Video URL loaded</p>
-                      <Button
-                        variant="outline"
-                        size="sm"
-                        onClick={() => setUrl('')}
-                      >
-                        Change Video
-                      </Button>
-                    </div>
-                    <UrlVideoPreview
-                      url={url}
-                      onTimeRangeChange={(start, end) => setTimeRange({ start, end })}
-                    />
-                  </div>
                 ) : (
                   <VideoInput
                     onFileSelect={setFile}
-                    onUrlSubmit={setUrl}
+                    onUrlSubmit={() => {}}
                     file={file}
-                    url={url}
+                    hideUrl={true}
                     disabled={processing}
                   />
                 )}
 
                 <Button
                   onClick={handleProcess}
-                  disabled={processing || (!file && !url)}
+                  disabled={processing || !file}
                   className="w-full gradient-primary hover:opacity-90 transition-opacity"
                   size="lg"
                 >

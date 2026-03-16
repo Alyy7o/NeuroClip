@@ -91,6 +91,16 @@ def get_transforms():
     ])
 
 def load_ocr_model(path):
+    # --- Kaggle Dataset Support ---
+    # On Kaggle, datasets are added to /kaggle/input/dataset-name/*.pth
+    # We search for our specific model filename in the entire input dir.
+    kaggle_input = Path("/kaggle/input")
+    if kaggle_input.exists():
+        found_models = list(kaggle_input.glob("**/neuroclip_v1.pth"))
+        if found_models:
+            path = str(found_models[0])
+            print(f"--- [GPU] Loading model from Kaggle Dataset: {path} ---")
+
     model = CustomNeuroClip(embed_dim=256)
     try:
         if os.path.exists(path):

@@ -466,7 +466,13 @@ def process_video_workflow(
     
     try:
         # custom_model_training is in the NeuroClip root (one level up from REPO_ROOT)
+        # Try to find model in Kaggle datasets first
         model_path = REPO_ROOT.parent / "custom_model_training" / "neuroclip_v1.pth"
+        kaggle_input = Path("/kaggle/input")
+        if kaggle_input.exists():
+            found_models = list(kaggle_input.glob("**/neuroclip_v1.pth"))
+            if found_models:
+                model_path = found_models[0]
         ocr_model = load_ocr_model(str(model_path))
         if ocr_model:
             frames_dir = output_dir / "frames" / job_id
@@ -1175,7 +1181,13 @@ async def upload_and_search(
     # However, to keep it simple, we'll focus on the primary process_video_workflow.
     # We'll add OCR here as well for full coverage.
     try:
+        # Try to find model in Kaggle datasets first
         model_path = Path(__file__).resolve().parents[2] / "custom_model_training" / "neuroclip_v1.pth"
+        kaggle_input = Path("/kaggle/input")
+        if kaggle_input.exists():
+            found_models = list(kaggle_input.glob("**/neuroclip_v1.pth"))
+            if found_models:
+                model_path = found_models[0]
         ocr_model = load_ocr_model(str(model_path))
         if ocr_model:
             frames_dir = output_dir / "frames" / job_id

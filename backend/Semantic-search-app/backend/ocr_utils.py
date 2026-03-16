@@ -213,7 +213,7 @@ def run_ocr_on_frames(image_folder):
 
     try:
         import easyocr
-        reader = easyocr.Reader(['en'], gpu=(DEVICE=="cuda"))
+        reader = easyocr.Reader(['en'], gpu=(DEVICE.startswith("cuda")))
     except ImportError:
         print("EasyOCR not installed. Skipping OCR.")
         return []

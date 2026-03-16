@@ -465,6 +465,7 @@ def process_video_workflow(
     output_dir.mkdir(parents=True, exist_ok=True)
     
     try:
+        ocr_text_data = []
         # custom_model_training is in the NeuroClip root (one level up from REPO_ROOT)
         # Try to find model in Kaggle datasets first
         model_path = REPO_ROOT.parent / "custom_model_training" / "neuroclip_v1.pth"
@@ -1159,7 +1160,10 @@ async def upload_and_search(
     allowed_ext = {".mp3", ".wav", ".m4a", ".mp4", ".mov", ".webm", ".ogg", ".flac"}
     ext = saved_path.suffix.lower()
     if ext not in allowed_ext:
-        raise HTTPException(status_code=400, detail=ext)
+        raise HTTPException(
+            status_code=400, 
+            detail=f"Unsupported media type '{ext}'. Please upload audio/video (e.g., .mp3, .wav, .mp4)"
+        )
     if not os.getenv("ASSEMBLYAI_API_KEY", "").strip():
         raise HTTPException(status_code=400, detail="ASSEMBLYAI_API_KEY not configured")
     srt_out = output_dir / f"{saved_path.stem}.srt"
@@ -1177,9 +1181,10 @@ async def upload_and_search(
     sentences = parse_srt_blocks(srt_text)
 
     # Note: upload-and-search is a faster path, but for consistency we should 
-    # ideally run OCR here too if we want enhanced accuracy. 
+    # ideal run OCR here too if we want enhanced accuracy. 
     # However, to keep it simple, we'll focus on the primary process_video_workflow.
     # We'll add OCR here as well for full coverage.
+    ocr_text_data = []
     try:
         # Try to find model in Kaggle datasets first
         model_path = Path(__file__).resolve().parents[2] / "custom_model_training" / "neuroclip_v1.pth"

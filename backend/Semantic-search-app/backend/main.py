@@ -1969,6 +1969,9 @@ async def compress_video(
     # -------------------------------------------------------------------------
     if supabase is not None:
         try:
+            rel_path = output_path.relative_to(REPO_ROOT / "output_data")
+            static_url = f"/static/{rel_path.as_posix()}"
+
             # A. processing_history (The job log)
             if user_id:
                 supabase.table("processing_history").insert({
@@ -1986,20 +1989,26 @@ async def compress_video(
                     "status": "completed",
                 }).execute()
             
-            # B. video_embeddings (The metadata source for History.tsx and VideoClips.tsx)
-            # This allows the history page to show the title, duration, and direct video URL
-            rel_path = output_path.relative_to(REPO_ROOT / "output_data")
-            static_url = f"/static/{rel_path.as_posix()}"
-            
-            supabase.table("video_embeddings").insert({
-                "job_id":        job_id,
-                "video_url":     static_url,
-                "title":         safe_name,
-                "duration":      int(probe_duration),
-                "description":   f"Compressed via {mode_label}. Original size: {original_size}, Compressed: {compressed_size}",
-                "thumbnail_url": None,
-                "transcript":    None,
-            }).execute()
+            # B. user_videos (Primary metadata table for all video types)
+            # Storing here ensures visual tracking in history even for non-AI tasks
+            if user_id:
+                supabase.table("user_videos").upsert({
+                    "id":                job_id,
+                    "user_id":           user_id,
+                    "job_id":            job_id,
+                    "title":             safe_name,
+                    "original_filename": safe_name,
+                    "video_url":         static_url,
+                    "file_size":         int(compressed_size),
+                    "duration":          float(probe_duration),
+                    "status":            "completed",
+                    "metadata": {
+                        "encoder": mode_label,
+                        "original_size": original_size,
+                        "reduction": reduction,
+                        "proc_time": duration
+                    }
+                }).execute()
             
         except Exception as e:
             print("Supabase persistence failed for compression job:", e)

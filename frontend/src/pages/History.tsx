@@ -67,22 +67,42 @@ export default function History() {
       const vids: string[] = Array.from(new Set((rows || []).map((r: any) => r.job_id).filter(Boolean))).map(String);
       const vmeta: Record<string, VideoMeta> = {};
       if (vids.length > 0) {
-        const { data: vm, error: vErr } = await supabase
-          .from('video_embeddings' as any)
-          .select('job_id,title,video_url,duration')
-          .in('job_id', vids as string[])
-          .returns<{ job_id: string; title?: string; video_url?: string; duration?: number }[]>();
-        if (vErr) throw vErr;
-        for (const r of vm || []) vmeta[r.job_id] = {
-          id: r.job_id,
-          title: r.title,
-          video_url: r.video_url,
-          duration: r.duration,
-          original_filename: undefined,
-          created_at: undefined,
-          metadata: null,
-          thumbnail_url: null,
-        };
+        // Query both tables and merge - user_videos is primary for all, video_embeddings for search
+        const [veRes, uvRes] = await Promise.all([
+          supabase
+            .from('video_embeddings' as any)
+            .select('job_id,title,video_url,duration')
+            .in('job_id', vids)
+            .returns<any[]>(),
+          supabase
+            .from('user_videos')
+            .select('id,title,video_url,duration')
+            .in('id', vids)
+        ]);
+
+        if (veRes.error) throw veRes.error;
+        if (uvRes.error) throw uvRes.error;
+
+        // Populate from video_embeddings first
+        for (const r of (veRes.data || [])) {
+          vmeta[r.job_id] = {
+            id: r.job_id,
+            title: r.title,
+            video_url: r.video_url,
+            duration: r.duration,
+          };
+        }
+
+        // Merge/Override from user_videos
+        for (const r of (uvRes.data || [])) {
+          vmeta[r.id] = {
+            ...(vmeta[r.id] || {}),
+            id: r.id,
+            title: r.title || vmeta[r.id]?.title,
+            video_url: r.video_url || vmeta[r.id]?.video_url,
+            duration: r.duration || vmeta[r.id]?.duration,
+          };
+        }
       }
       const items: HistoryItem[] = (rows || []).map((r: any) => ({
         id: r.id,

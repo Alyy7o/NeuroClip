@@ -1770,23 +1770,39 @@ async def compress_video(
     user_id: Optional[str] = Form(None)
 ):
     """
-    Compresses an uploaded video using FFmpeg with H.265, scaling to 720p width, and CRF 26.
+    Compresses an uploaded video using FFmpeg with H.265, scaling to 720p, and CRF 28.
     Returns the compressed video URL and size statistics.
+    
+    Fixes applied:
+    - FFmpeg flag ordering bug: all quality flags now appear BEFORE output path
+    - Removed CRF + bitrate conflict on CPU mode (CRF-only now)
+    - Scale filter capped at 720p height instead of 1280px width
+    - Lowered GPU bitrate targets to prevent large file bloat
+    - Switched CPU preset from 'fast' to 'medium' for better compression ratio
+    - Reduced audio bitrate from 128k to 96k
+    - Explicit x265 thread pool limit to avoid Kaggle threading issues
     """
     import subprocess
+
+    # -------------------------------------------------------------------------
+    # 1. Directory Setup
+    # -------------------------------------------------------------------------
     try:
         uploads_dir = REPO_ROOT / "uploads"
         uploads_dir.mkdir(parents=True, exist_ok=True)
-        
+
         output_dir = REPO_ROOT / "output_data" / "compressed"
         output_dir.mkdir(parents=True, exist_ok=True)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Directory setup failed: {e}")
 
+    # -------------------------------------------------------------------------
+    # 2. File Save
+    # -------------------------------------------------------------------------
     safe_name = Path(file.filename or "video.mp4").name
-    job_id = str(uuid.uuid4())
-    input_path = uploads_dir / f"{job_id}_in_{safe_name}"
-    output_path = output_dir / f"{job_id}_compressed_{safe_name}"
+    job_id    = str(uuid.uuid4())
+    input_path  = uploads_dir / f"{job_id}_in_{safe_name}"
+    output_path = output_dir  / f"{job_id}_compressed_{safe_name}"
 
     try:
         with input_path.open("wb") as out:
@@ -1796,7 +1812,9 @@ async def compress_video(
 
     original_size = input_path.stat().st_size
 
-    # Check for ffmpeg
+    # -------------------------------------------------------------------------
+    # 3. Locate FFmpeg
+    # -------------------------------------------------------------------------
     ff = shutil.which("ffmpeg")
     if not ff:
         try:
@@ -1805,18 +1823,26 @@ async def compress_video(
         except Exception:
             raise HTTPException(status_code=500, detail="FFmpeg not found on server")
 
-    # --- Robust GPU Detection ---
-    has_gpu = False
+    # -------------------------------------------------------------------------
+    # 4. GPU Detection
+    # -------------------------------------------------------------------------
+    has_gpu   = False
     v_encoder = "libx265"
+
     try:
-        # 1. Check if nvidia-smi exists (Kaggle/NVIDIA specific)
-        import subprocess
-        gpu_check = subprocess.run(["nvidia-smi"], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        gpu_check = subprocess.run(
+            ["nvidia-smi"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE
+        )
         if gpu_check.returncode == 0:
-            # 2. Check if ffmpeg supports hevc_nvenc
-            codec_check = subprocess.run([ff, "-encoders"], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            codec_check = subprocess.run(
+                [ff, "-encoders"],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE
+            )
             if b"hevc_nvenc" in codec_check.stdout:
-                has_gpu = True
+                has_gpu   = True
                 v_encoder = "hevc_nvenc"
                 print("--- [GPU] NVIDIA HEVC NVENC detected and enabled. ---")
     except Exception as e:
@@ -1825,88 +1851,131 @@ async def compress_video(
     if not has_gpu:
         print("--- [CPU] Using libx265 (CPU encoding). ---")
 
-    # Command optimized for: 
-    # 1. Compression Efficiency (H.265 / HEVC)
-    # 2. GPU Speed (hevc_nvenc)
-    
+    # -------------------------------------------------------------------------
+    # 5. Build FFmpeg Command
+    #
+    #    CRITICAL FIX: All quality/encoding flags MUST appear before the output
+    #    path. Previously flags were appended via cmd.extend() AFTER the output
+    #    path string, causing FFmpeg to silently ignore them — resulting in
+    #    default (very high quality / large file) encoding on large videos.
+    #
+    #    Scale filter: "scale=-2:min(720,ih)" caps height at 720p while
+    #    preserving aspect ratio. If the video is already smaller than 720p it
+    #    is left untouched (ih = input height).
+    # -------------------------------------------------------------------------
+    vf = "scale=-2:min(720\\,ih)"   # cap at 720p; keep smaller videos as-is
+
+    # --- common input flags ---
     cmd = [
         ff, "-y",
         "-i", str(input_path),
-        "-vf", "scale=1280:-2",
-        "-c:v", v_encoder,
-        "-preset", "p3" if has_gpu else "fast",
-        "-threads", "0",
-        "-c:a", "aac",
-        "-b:a", "128k",
-        "-movflags", "+faststart",
-        str(output_path)
+        "-vf", vf,
     ]
-    
-    if has_gpu:
-        # HEVC NVENC quality control
-        cmd.extend([
-            "-rc", "vbr",
-            "-cq", "28",
-            "-b:v", "2M",             # Target Bitrate
-            "-maxrate", "3M",         # Max Bitrate Cap (prevents size bloat)
-            "-bufsize", "6M",
-            "-qmin", "24",
-            "-qmax", "34"
-        ])
-    else:
-        # CPU (libx265) quality control
-        cmd.extend([
-            "-crf", "28",
-            "-b:v", "1.5M",           # Stricter for CPU
-            "-maxrate", "2.5M",
-            "-bufsize", "5M"
-        ])
 
+    if has_gpu:
+        # GPU path: HEVC NVENC — VBR with tighter bitrate ceiling
+        cmd += [
+            "-c:v",     "hevc_nvenc",
+            "-preset",  "p4",        # better compression than p3
+            "-rc",      "vbr",
+            "-cq",      "28",
+            "-b:v",     "1.5M",      # target bitrate  (was 2M)
+            "-maxrate", "2.5M",      # hard cap        (was 3M)
+            "-bufsize", "5M",
+            "-qmin",    "24",
+            "-qmax",    "36",        # allow more compression on easy scenes
+        ]
+        mode_label = "HEVC_NVENC"
+    else:
+        # CPU path: libx265 — CRF only (no conflicting -b:v)
+        # Mixing -crf with -b:v in libx265 causes undefined/bloated output.
+        cmd += [
+            "-c:v",        "libx265",
+            "-preset",     "medium",          # better ratio than 'fast'
+            "-crf",        "28",              # sole quality knob — no -b:v
+            "-x265-params","pools=4:frame-threads=2",  # explicit Kaggle-safe threading
+        ]
+        mode_label = "LIBX265"
+
+    # --- shared audio + container flags, then output path (always last) ---
+    cmd += [
+        "-c:a",      "aac",
+        "-b:a",      "96k",          # reduced from 128k
+        "-movflags", "+faststart",
+        str(output_path),            # OUTPUT PATH IS LAST — never append flags after this
+    ]
+
+    # -------------------------------------------------------------------------
+    # 6. Run Compression
+    # -------------------------------------------------------------------------
     start_time = time.time()
     try:
-        subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        subprocess.run(
+            cmd,
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE
+        )
     except subprocess.CalledProcessError as e:
-        err_out = e.stderr.decode('utf-8') if e.stderr else str(e)
+        err_out = e.stderr.decode("utf-8", errors="replace") if e.stderr else str(e)
         raise HTTPException(status_code=500, detail=f"Compression failed: {err_out}")
+
     duration = time.time() - start_time
 
+    # -------------------------------------------------------------------------
+    # 7. Validate Output
+    # -------------------------------------------------------------------------
     if not output_path.exists() or output_path.stat().st_size == 0:
         raise HTTPException(status_code=500, detail="Compression resulted in empty file")
 
     compressed_size = output_path.stat().st_size
-    reduction = 100 - (compressed_size / original_size * 100) if original_size > 0 else 0
+    reduction = (
+        100 - (compressed_size / original_size * 100)
+        if original_size > 0 else 0
+    )
 
-    # Save to processing history
+    # -------------------------------------------------------------------------
+    # 8. Save to Processing History
+    # -------------------------------------------------------------------------
     if user_id and supabase is not None:
         try:
             supabase.table("processing_history").insert({
-                "user_id": user_id,
-                "job_id": job_id,
-                "video_id": job_id,
-                "module": "compression",
+                "user_id":    user_id,
+                "job_id":     job_id,
+                "video_id":   job_id,
+                "module":     "compression",
                 "input_type": "file",
-                "input_url": safe_name,
-                "query": f"H.265 / {'HEVC_NVENC' if has_gpu else 'LIBX265'} / 720p / Duration: {duration:.2f}s",
+                "input_url":  safe_name,
+                "query":      (
+                    f"H.265 / {mode_label} / 720p / "
+                    f"Duration: {duration:.2f}s / "
+                    f"Reduction: {reduction:.1f}%"
+                ),
                 "status": "completed",
             }).execute()
         except Exception as e:
             print("History save failed:", e)
 
-    # Calculate relative URL for frontend
+    # -------------------------------------------------------------------------
+    # 9. Return Response
+    # -------------------------------------------------------------------------
     rel_path = output_path.relative_to(REPO_ROOT / "output_data")
-    
+
     return {
-        "job_id": job_id,
-        "original_size": original_size,
-        "compressed_size": compressed_size,
-        "reduction": round(reduction, 2),
+        "job_id":           job_id,
+        "original_size":    original_size,
+        "compressed_size":  compressed_size,
+        "reduction":        round(reduction, 2),
         "duration_seconds": round(duration, 2),
-        "url": f"/static/{rel_path.as_posix()}"
+        "encoder":          mode_label,
+        "url":              f"/static/{rel_path.as_posix()}",
     }
+
 
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8040)
+
 @app.get("/video-embeddings")
 def get_video_embeddings(video_id: Optional[str] = None, job_id: Optional[str] = None):
     if supabase is None:

@@ -118,10 +118,11 @@ ${data.duration_seconds ? `\n**Compression took:** ${data.duration_seconds} seco
 **Technical Details:**
 - Codec: H.265/HEVC (GPU Accelerated)
 - Resolution: Max 720p (scaled)
+- Bitrate Target: 2Mbps (Capped)
 - Quality Control: CQ 28 (Constant Quality)
 - Audio: AAC compression (128k)
 
-The compression algorithm intelligently scales the video down to 720p and optimizes the bitrate using high-efficiency HEVC encoding. We use hardware-optimized acceleration to drastically reduce processing time while achieving superior file size reductions.`,
+The compression algorithm intelligently scales the video down to 720p and optimizes the bitrate using high-efficiency HEVC encoding with strict size caps. We use hardware-optimized acceleration to drastically reduce processing time while achieving superior file size reductions.`,
         duration: timeRange.end - timeRange.start,
         originalDuration: timeRange.end,
       });

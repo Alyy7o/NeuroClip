@@ -1847,13 +1847,19 @@ async def compress_video(
         cmd.extend([
             "-rc", "vbr",
             "-cq", "28",
+            "-b:v", "2M",             # Target Bitrate
+            "-maxrate", "3M",         # Max Bitrate Cap (prevents size bloat)
+            "-bufsize", "6M",
             "-qmin", "24",
             "-qmax", "34"
         ])
     else:
         # CPU (libx265) quality control
         cmd.extend([
-            "-crf", "28"
+            "-crf", "28",
+            "-b:v", "1.5M",           # Stricter for CPU
+            "-maxrate", "2.5M",
+            "-bufsize", "5M"
         ])
 
     start_time = time.time()

@@ -5,19 +5,14 @@ import { DashboardLayout } from '@/components/DashboardLayout';
 import { VideoInput } from '@/components/VideoInput';
 import { VideoPreview } from '@/components/VideoPreview';
 import { UrlVideoPreview } from '@/components/UrlVideoPreview';
-import { VideoPlayer } from '@/components/VideoPlayer';
 import { ProcessingLoader } from '@/components/ProcessingLoader';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { useToast } from '@/hooks/use-toast';
-import { supabase } from '@/integrations/supabase/client';
 import { useAuth } from '@/contexts/AuthContext';
 import { z } from 'zod';
 
 const processingSchema = z.object({
-  query: z.string()
-    .trim()
-    .max(1000, { message: "Query must be less than 1000 characters" }),
   url: z.string()
     .trim()
     .max(2048, { message: "URL too long" })
@@ -35,10 +30,25 @@ export default function Compression() {
   const [url, setUrl] = useState('');
   const [timeRange, setTimeRange] = useState({ start: 0, end: 0 });
   const [processing, setProcessing] = useState(false);
+  const [currentStep, setCurrentStep] = useState(0);
+  const [uploadProgress, setUploadProgress] = useState(0);
   const [showResults, setShowResults] = useState(false);
   const [result, setResult] = useState<any>(null);
   const { toast } = useToast();
   const { user } = useAuth();
+
+  const compressionSteps = [
+    'Uploading video to server',
+    'Scanning for GPU acceleration',
+    'Compressing video (H.265/HEVC)',
+    'Finalizing and saving results'
+  ];
+
+  const formatFileSize = (bytes: number) => {
+    if (bytes < 1024) return bytes + ' B';
+    if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(2) + ' KB';
+    return (bytes / 1024 / 1024).toFixed(2) + ' MB';
+  };
 
   const handleProcess = async () => {
     if (!file && !url) {
@@ -51,49 +61,69 @@ export default function Compression() {
     }
 
     setProcessing(true);
+    setCurrentStep(0);
+    setUploadProgress(0);
 
     try {
-      const validationResult = processingSchema.safeParse({
-        query: 'H.265 / 720p / CRF 28 (Fast)',
-        url: url || '',
-        fileName: file?.name
-      });
-
-      if (!validationResult.success) {
-        toast({
-          title: 'Validation Error',
-          description: validationResult.error.errors[0].message,
-          variant: 'destructive'
-        });
-        setProcessing(false);
-        return;
-      }
-
-      const validated = validationResult.data;
-
-      // Prepare form data for the actual backend compression API
+      // Prepare form data
       const formData = new FormData();
       if (file) {
         formData.append('file', file);
       } else {
-        throw new Error("URL compression not yet supported in this flow."); // Only using file for now based on UI
+        throw new Error("URL compression not yet supported in this flow.");
       }
       if (user?.id) {
         formData.append('user_id', user.id);
       }
 
       const API_BASE = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8040';
-      const response = await fetch(`${API_BASE}/compress-video`, {
-        method: 'POST',
-        body: formData,
+      
+      // Use XMLHttpRequest for upload progress
+      const xhr = new XMLHttpRequest();
+      
+      const uploadPromise = new Promise((resolve, reject) => {
+        xhr.upload.addEventListener('progress', (event) => {
+          if (event.lengthComputable) {
+            const progress = Math.round((event.loaded / event.total) * 100);
+            setUploadProgress(progress);
+            if (progress === 100) {
+              setCurrentStep(1); // Move to "Scanning for GPU"
+            }
+          }
+        });
+
+        xhr.onload = () => {
+          if (xhr.status >= 200 && xhr.status < 300) {
+            resolve(JSON.parse(xhr.responseText));
+          } else {
+            try {
+              const err = JSON.parse(xhr.responseText || '{}');
+              reject(new Error(err.detail || 'Compression failed'));
+            } catch {
+              reject(new Error('Compression failed'));
+            }
+          }
+        };
+
+        xhr.onerror = () => reject(new Error('Network error during upload'));
+        
+        xhr.open('POST', `${API_BASE}/compress-video`);
+        xhr.send(formData);
       });
 
-      if (!response.ok) {
-        const errData = await response.json().catch(() => null);
-        throw new Error(errData?.detail || 'Compression failed on server');
-      }
+      // Simulation of step transitions while backend works
+      const stepInterval = setInterval(() => {
+        setCurrentStep(prev => {
+          if (prev >= 1 && prev < compressionSteps.length - 1) {
+            return prev + 1;
+          }
+          return prev;
+        });
+      }, 5000);
 
-      const data = await response.json();
+      const data: any = await uploadPromise;
+      clearInterval(stepInterval);
+      setCurrentStep(compressionSteps.length - 1); // Finalizing
 
       const originalSize = data.original_size;
       const compressedSize = data.compressed_size;
@@ -113,7 +143,7 @@ ${data.duration_seconds ? `\n**Compression took:** ${data.duration_seconds} seco
 **Compression Statistics:**
 - Original size: ${formatFileSize(originalSize)}
 - Compressed size: ${formatFileSize(compressedSize)}
-- Size reduction: ${reduction}%
+- Size reduction: ${reduction.toFixed(2)}%
 
 **Technical Details:**
 - Codec: H.265/HEVC (GPU Accelerated)
@@ -151,17 +181,16 @@ The compression algorithm intelligently scales the video down to 720p and optimi
     setUrl('');
   };
 
-  const formatFileSize = (bytes: number) => {
-    if (bytes < 1024) return bytes + ' B';
-    if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(2) + ' KB';
-    return (bytes / 1024 / 1024).toFixed(2) + ' MB';
-  };
-
   return (
     <DashboardLayout>
       <AnimatePresence mode="wait">
         {processing ? (
-          <ProcessingLoader key="loader" />
+          <ProcessingLoader 
+            key="loader" 
+            steps={compressionSteps} 
+            currentStep={currentStep} 
+            uploadProgress={uploadProgress} 
+          />
         ) : showResults ? (
           <motion.div
             key="results"
@@ -178,7 +207,7 @@ The compression algorithm intelligently scales the video down to 720p and optimi
                 <div>
                   <h1 className="text-2xl md:text-3xl font-bold">Compressed Video</h1>
                   <p className="text-sm md:text-base text-muted-foreground">
-                    {result?.reduction}% size reduction
+                    {result?.reduction?.toFixed(2)}% size reduction
                   </p>
                 </div>
               </div>
@@ -209,7 +238,7 @@ The compression algorithm intelligently scales the video down to 720p and optimi
                   <Card className="bg-accent/10 border-accent/20">
                     <CardContent className="pt-6 text-center">
                       <p className="text-xs sm:text-sm text-muted-foreground mb-1">Size Reduction</p>
-                      <p className="text-xl sm:text-2xl font-bold text-accent">{result.reduction}%</p>
+                      <p className="text-xl sm:text-2xl font-bold text-accent">{result.reduction?.toFixed(2)}%</p>
                     </CardContent>
                   </Card>
                 </div>
@@ -218,7 +247,7 @@ The compression algorithm intelligently scales the video down to 720p and optimi
 
             <Card className="gradient-card border-border/50">
               <CardHeader>
-                <CardTitle>Compressed Video</CardTitle>
+                <CardTitle>Compressed Video Result</CardTitle>
                 <CardDescription className="flex flex-col gap-1">
                   <span>Video length: {result?.duration?.toFixed(1)}s</span>
                   {result?.durationSeconds && (
@@ -229,14 +258,12 @@ The compression algorithm intelligently scales the video down to 720p and optimi
                 </CardDescription>
               </CardHeader>
               <CardContent className="space-y-6">
-
                 <div className="flex flex-col sm:flex-row gap-3">
                   <Button className="flex-1 gradient-primary" size="lg" onClick={() => {
                     const a = document.createElement('a');
                     a.href = result?.processedVideoUrl;
-                    a.download = 'compressed_video.mp4'; // Suggest a name, though headers usually dictate
+                    a.download = 'compressed_video.mp4';
                     a.target = '_blank';
-                    // We can also trigger a direct download via our backend /download endpoint if cross-origin rules prevent it
                     document.body.appendChild(a);
                     a.click();
                     document.body.removeChild(a);

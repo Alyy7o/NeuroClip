@@ -46,19 +46,45 @@ except Exception:
 # --- Environment Variables ---
 try:
     from dotenv import load_dotenv
-    # Load .env - check all likely locations, most specific first
+    # Load ALL candidate .env files so vars from every file are merged.
+    # override=True ensures file values always win over any stale empty
+    # values that may have been inherited from the parent process.
     _env_candidates = [
-        BASE_DIR.parent / ".env",          # backend/Semantic-search-app/.env  (has ALL keys)
-        REPO_ROOT / ".env",                # backend/.env
-        BASE_DIR.parent.parent / ".env",   # backend/
+        BASE_DIR.parent / ".env",          # Semantic-search-app/.env  (primary — has ALL keys)
+        REPO_ROOT / ".env",                # backend/Semantic-search-app/.env  (alias, same)
+        BASE_DIR.parent.parent / ".env",   # backend/.env
         BASE_DIR / ".env",                 # backend/Semantic-search-app/backend/.env
     ]
     for p in _env_candidates:
         if p.exists():
-            load_dotenv(str(p), override=False)
-            # Don't break — load all so vars from multiple files merge
+            load_dotenv(str(p), override=True)  # override=True fills any empty vars
 except ImportError:
-    pass
+    # dotenv not available — fall back to manual parse
+    _env_candidates = [
+        BASE_DIR.parent / ".env",
+        BASE_DIR.parent.parent / ".env",
+    ]
+    for p in _env_candidates:
+        try:
+            if p.exists():
+                for _line in p.read_text(encoding="utf-8", errors="replace").splitlines():
+                    _s = _line.strip()
+                    if not _s or _s.startswith("#") or "=" not in _s:
+                        continue
+                    _k, _v = _s.split("=", 1)
+                    _k = _k.strip().strip('"').strip("'")
+                    _v = _v.strip().strip('"').strip("'")
+                    if _k:
+                        os.environ[_k] = _v  # always set (override)
+        except Exception:
+            continue
+
+# Startup env diagnostic
+_aai_key = os.getenv("ASSEMBLYAI_API_KEY", "")
+print(f"[startup] BASE_DIR={BASE_DIR}")
+print(f"[startup] REPO_ROOT={REPO_ROOT}")
+print(f"[startup] ASSEMBLYAI_API_KEY={'SET (len=' + str(len(_aai_key)) + ')' if _aai_key.strip() else 'NOT SET — check .env!'}")
+print(f"[startup] SUPABASE_URL={'SET' if os.getenv('SUPABASE_URL') else 'not set'}")
 
 # Ensure required directories exist for StaticFiles
 (REPO_ROOT / "uploads").mkdir(parents=True, exist_ok=True)
@@ -375,8 +401,6 @@ async def transcribe_file(
         fname = srt_filename or (Path(file.filename).stem + ".srt")
         out_path = out_dir / fname
 
-    if not os.getenv("ASSEMBLYAI_API_KEY", "").strip():
-        raise HTTPException(status_code=400, detail="ASSEMBLYAI_API_KEY not configured")
     try:
         result = generate_transcript_from_video(
             source=str(temp_path),
@@ -384,6 +408,7 @@ async def transcribe_file(
             language_code=language_code,
         )
     except ValueError as e:
+        # generate_transcript_from_video raises ValueError when API key is missing
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"Transcription failed: {e}")
@@ -520,14 +545,14 @@ def process_video_workflow(
 
     if not result.get("status") == "completed":
         # AssemblyAI transcription
-        if not os.getenv("ASSEMBLYAI_API_KEY", "").strip():
-            raise HTTPException(status_code=400, detail="ASSEMBLYAI_API_KEY not configured")
         try:
             result = generate_transcript_from_video(
                 source=str(saved_path),
                 output_srt_path=str(srt_out),
                 language_code=None,
             )
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
         except Exception as e:
             raise HTTPException(status_code=502, detail=f"Transcription failed: {e}")
 
@@ -1170,8 +1195,6 @@ async def upload_and_search(
             status_code=400, 
             detail=f"Unsupported media type '{ext}'. Please upload audio/video (e.g., .mp3, .wav, .mp4)"
         )
-    if not os.getenv("ASSEMBLYAI_API_KEY", "").strip():
-        raise HTTPException(status_code=400, detail="ASSEMBLYAI_API_KEY not configured — check your .env file")
     srt_out = output_dir / f"{saved_path.stem}.srt"
     try:
         result = generate_transcript_from_video(

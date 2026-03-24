@@ -46,11 +46,17 @@ except Exception:
 # --- Environment Variables ---
 try:
     from dotenv import load_dotenv
-    # Load .env from backend root or app root
-    for p in [REPO_ROOT / ".env", BASE_DIR.parent / ".env"]:
+    # Load .env - check all likely locations, most specific first
+    _env_candidates = [
+        BASE_DIR.parent / ".env",          # backend/Semantic-search-app/.env  (has ALL keys)
+        REPO_ROOT / ".env",                # backend/.env
+        BASE_DIR.parent.parent / ".env",   # backend/
+        BASE_DIR / ".env",                 # backend/Semantic-search-app/backend/.env
+    ]
+    for p in _env_candidates:
         if p.exists():
-            load_dotenv(str(p))
-            break
+            load_dotenv(str(p), override=False)
+            # Don't break — load all so vars from multiple files merge
 except ImportError:
     pass
 
@@ -1165,7 +1171,7 @@ async def upload_and_search(
             detail=f"Unsupported media type '{ext}'. Please upload audio/video (e.g., .mp3, .wav, .mp4)"
         )
     if not os.getenv("ASSEMBLYAI_API_KEY", "").strip():
-        raise HTTPException(status_code=400, detail="ASSEMBLYAI_API_KEY not configured")
+        raise HTTPException(status_code=400, detail="ASSEMBLYAI_API_KEY not configured — check your .env file")
     srt_out = output_dir / f"{saved_path.stem}.srt"
     try:
         result = generate_transcript_from_video(
@@ -1173,12 +1179,34 @@ async def upload_and_search(
             output_srt_path=str(srt_out),
             language_code=None,
         )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
-        raise HTTPException(status_code=502, detail=str(e))
-    srt_text = result.get("srt_text")
+        raise HTTPException(status_code=502, detail=f"Transcription failed: {e}")
+    # Resolve SRT text: prefer the in-result srt_text, then read from disk, then plain text
+    srt_text = result.get("srt_text") or ""
+    if not srt_text and result.get("srt_path"):
+        try:
+            srt_text = Path(str(result["srt_path"])).read_text(encoding="utf-8", errors="replace")
+        except Exception:
+            srt_text = ""
+    if not srt_text and srt_out.exists():
+        try:
+            srt_text = srt_out.read_text(encoding="utf-8", errors="replace")
+        except Exception:
+            srt_text = ""
     if not srt_text:
-        raise HTTPException(status_code=502, detail="SRT not available")
+        # Last resort: use raw transcript text (non-SRT) to build a single sentence block
+        srt_text = result.get("text", "")
     sentences = parse_srt_blocks(srt_text)
+    # If SRT parsing yielded nothing but we have plain text, synthesize a single sentence entry
+    if not sentences and result.get("text", "").strip():
+        sentences = [{
+            "sentence": result["text"].strip(),
+            "starttime": "0.00",
+            "endtime": "0.00",
+            "verbs": []
+        }]
 
     # Note: upload-and-search is a faster path, but for consistency we should 
     # ideal run OCR here too if we want enhanced accuracy. 
@@ -1219,6 +1247,8 @@ async def upload_and_search(
         print(f"OCR in upload-and-search failed: {e}")
 
     duration_seconds = sentences[-1]["endtime"] if sentences else "0.00"
+    if not sentences:
+        raise HTTPException(status_code=502, detail="Transcription produced no content. The video may be silent or the transcript empty.")
     meta = build_metadata({}, srt_path=str(saved_path.with_suffix('.srt')), video_path=str(saved_path))
     if duration_seconds and meta.get("duration") in (None, "N/A"):
         meta["duration"] = duration_seconds

@@ -9,6 +9,7 @@ import requests
 import assemblyai as aai
 from pathlib import Path
 from typing import Optional
+import torch
 from pydantic import BaseModel
 from fastapi import FastAPI, HTTPException, UploadFile, File, Form
 from fastapi.responses import FileResponse
@@ -1301,8 +1302,9 @@ async def upload_and_search(
             json.dumps(emb, ensure_ascii=False),
             encoding="utf-8",
         )
-    except Exception:
-        pass
+    except Exception as emb_err:
+        print(f"[upload-and-search] Embedding generation failed: {emb_err}")
+        import traceback; traceback.print_exc()
     # Persist to supabase
     try:
         if supabase is not None:
@@ -1395,22 +1397,29 @@ async def upload_and_search(
     except Exception:
         pass
 
-    payload = ClipSearchRequest(
-        json_path=str(json_path), 
-        job_id=job_id, 
-        query=query, 
-        top_k=top_k, 
-        margin_secs=margin_secs,
-        use_windows=use_windows,
-        window_size=window_size,
-        window_stride=window_stride,
-        expand_neighbors=expand_neighbors,
-        min_clip_secs=min_clip_secs,
-        max_clip_secs=max_clip_secs,
-        rerank=rerank
-    )
-    r = clips_search(payload)
-    return UploadAndSearchResponse(job_id=job_id, json_path=str(json_path), srt_path=str(srt_out), results=r["results"], count=r["count"]) 
+    try:
+        payload = ClipSearchRequest(
+            json_path=str(json_path), 
+            job_id=job_id, 
+            query=query, 
+            top_k=top_k, 
+            margin_secs=margin_secs,
+            use_windows=use_windows,
+            window_size=window_size,
+            window_stride=window_stride,
+            expand_neighbors=expand_neighbors,
+            min_clip_secs=min_clip_secs,
+            max_clip_secs=max_clip_secs,
+            rerank=rerank
+        )
+        r = clips_search(payload)
+        return UploadAndSearchResponse(job_id=job_id, json_path=str(json_path), srt_path=str(srt_out), results=r["results"], count=r["count"])
+    except HTTPException:
+        raise
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Pipeline failed at clip search stage: {e}") 
 
 class DbSearchRequest(BaseModel):
     job_id: str

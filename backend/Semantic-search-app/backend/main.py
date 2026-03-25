@@ -44,47 +44,60 @@ except Exception:
     Client = None
 
 # --- Environment Variables ---
+# Priority 1: Kaggle Secrets — using the exact API pattern from Kaggle
 try:
-    from dotenv import load_dotenv
-    # Load ALL candidate .env files so vars from every file are merged.
-    # override=True ensures file values always win over any stale empty
-    # values that may have been inherited from the parent process.
+    from kaggle_secrets import UserSecretsClient
+    user_secrets = UserSecretsClient()
+    # Load each secret and inject into os.environ immediately
+    os.environ["ASSEMBLYAI_API_KEY"]      = user_secrets.get_secret("ASSEMBLYAI_API_KEY")
+    os.environ["GOOGLE_API_KEY"]          = user_secrets.get_secret("GOOGLE_API_KEY")
+    os.environ["SUPABASE_SERVICE_ROLE_KEY"] = user_secrets.get_secret("SUPABASE_SERVICE_ROLE_KEY")
+    os.environ["SUPABASE_URL"]            = user_secrets.get_secret("SUPABASE_URL")
+    os.environ["VITE_SUPABASE_ANON_KEY"]  = user_secrets.get_secret("VITE_SUPABASE_ANON_KEY")
+    # Copy SUPABASE_SERVICE_ROLE as alias (some code references this name)
+    os.environ.setdefault("SUPABASE_SERVICE_ROLE", os.environ.get("SUPABASE_SERVICE_ROLE_KEY", ""))
+    os.environ.setdefault("VITE_SUPABASE_URL", os.environ.get("SUPABASE_URL", ""))
+    print("[secrets] All Kaggle secrets loaded into os.environ ✓")
+except Exception as _kaggle_err:
+    print(f"[secrets] Kaggle secrets not available ({_kaggle_err}) — falling back to .env files")
+    # Priority 2: .env files (local dev / non-Kaggle servers)
     _env_candidates = [
-        BASE_DIR.parent / ".env",          # Semantic-search-app/.env  (primary — has ALL keys)
-        REPO_ROOT / ".env",                # backend/Semantic-search-app/.env  (alias, same)
+        BASE_DIR.parent / ".env",          # Semantic-search-app/.env
+        REPO_ROOT / ".env",                # same level alias
         BASE_DIR.parent.parent / ".env",   # backend/.env
         BASE_DIR / ".env",                 # backend/Semantic-search-app/backend/.env
+        Path("/kaggle/working") / ".env",  # Kaggle fall-through
     ]
-    for p in _env_candidates:
-        if p.exists():
-            load_dotenv(str(p), override=True)  # override=True fills any empty vars
-except ImportError:
-    # dotenv not available — fall back to manual parse
-    _env_candidates = [
-        BASE_DIR.parent / ".env",
-        BASE_DIR.parent.parent / ".env",
-    ]
-    for p in _env_candidates:
-        try:
+    try:
+        from dotenv import load_dotenv
+        for p in _env_candidates:
             if p.exists():
-                for _line in p.read_text(encoding="utf-8", errors="replace").splitlines():
-                    _s = _line.strip()
-                    if not _s or _s.startswith("#") or "=" not in _s:
-                        continue
-                    _k, _v = _s.split("=", 1)
-                    _k = _k.strip().strip('"').strip("'")
-                    _v = _v.strip().strip('"').strip("'")
-                    if _k:
-                        os.environ[_k] = _v  # always set (override)
-        except Exception:
-            continue
+                load_dotenv(str(p), override=True)
+                print(f"[env] Loaded: {p}")
+    except ImportError:
+        for p in _env_candidates:
+            try:
+                if p.exists():
+                    for _line in p.read_text(encoding="utf-8", errors="replace").splitlines():
+                        _s = _line.strip()
+                        if not _s or _s.startswith("#") or "=" not in _s:
+                            continue
+                        _k, _v = _s.split("=", 1)
+                        _k = _k.strip().strip('"').strip("'")
+                        _v = _v.strip().strip('"').strip("'")
+                        if _k and _v:
+                            os.environ[_k] = _v
+            except Exception:
+                continue
 
-# Startup env diagnostic
+# Startup diagnostic
 _aai_key = os.getenv("ASSEMBLYAI_API_KEY", "")
 print(f"[startup] BASE_DIR={BASE_DIR}")
 print(f"[startup] REPO_ROOT={REPO_ROOT}")
-print(f"[startup] ASSEMBLYAI_API_KEY={'SET (len=' + str(len(_aai_key)) + ')' if _aai_key.strip() else 'NOT SET — check .env!'}")
+print(f"[startup] ASSEMBLYAI_API_KEY={'SET (len='+str(len(_aai_key))+')' if _aai_key.strip() else 'NOT SET!'}")
 print(f"[startup] SUPABASE_URL={'SET' if os.getenv('SUPABASE_URL') else 'not set'}")
+print(f"[startup] GOOGLE_API_KEY={'SET' if os.getenv('GOOGLE_API_KEY') else 'not set'}")
+
 
 # Ensure required directories exist for StaticFiles
 (REPO_ROOT / "uploads").mkdir(parents=True, exist_ok=True)

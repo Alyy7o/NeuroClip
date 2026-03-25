@@ -4,6 +4,17 @@ from typing import Optional, Union, Dict
 
 import assemblyai as aai
 
+# --- Load environment: Kaggle Secrets first, then .env files ---
+# Priority 1: Kaggle Secrets (exact API pattern from Kaggle)
+if not os.environ.get("ASSEMBLYAI_API_KEY"):
+    try:
+        from kaggle_secrets import UserSecretsClient
+        user_secrets = UserSecretsClient()
+        os.environ["ASSEMBLYAI_API_KEY"] = user_secrets.get_secret("ASSEMBLYAI_API_KEY")
+    except Exception:
+        pass
+
+# Priority 2: .env files (local dev)
 env_loaded = False
 try:
     from dotenv import load_dotenv

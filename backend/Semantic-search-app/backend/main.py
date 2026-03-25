@@ -1309,6 +1309,7 @@ async def upload_and_search(
             if user_id:
                 meta_payload = {
                     "id": job_id,
+                    "job_id": job_id,
                     "user_id": user_id,
                     "title": meta.get("title") or safe_name,
                     "original_filename": safe_name,

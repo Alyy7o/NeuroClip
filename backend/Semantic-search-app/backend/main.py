@@ -243,6 +243,41 @@ def download_file(path: str):
         media_type='application/octet-stream'
     )
 
+@app.get("/serve-clip")
+def serve_clip(path: str):
+    """
+    Serve a video clip inline for playback.
+    Unlike /static which gets blocked by ngrok's browser interstitial,
+    this endpoint serves files directly with the correct video/mp4 MIME type.
+    
+    path: relative path under output_data, e.g. 'clips/UUID/clip_01.mp4'
+    """
+    base_output = REPO_ROOT / "output_data"
+    
+    # Security: prevent path traversal
+    safe_path = Path(path).as_posix()
+    if ".." in safe_path:
+        raise HTTPException(status_code=400, detail="Invalid path")
+    
+    target_file = base_output / safe_path
+    
+    if not target_file.exists() or not target_file.is_file():
+        raise HTTPException(status_code=404, detail=f"Clip not found: {safe_path}")
+    
+    # Determine MIME type
+    suffix = target_file.suffix.lower()
+    mime_map = {".mp4": "video/mp4", ".webm": "video/webm", ".mov": "video/quicktime"}
+    media_type = mime_map.get(suffix, "video/mp4")
+    
+    return FileResponse(
+        path=str(target_file),
+        media_type=media_type,
+        headers={
+            "Accept-Ranges": "bytes",
+            "Cache-Control": "public, max-age=3600",
+        },
+    )
+
 
 # --- SRT to JSON utilities (project format) ---
 TIME_RE = re.compile(r"^(\d{2}):(\d{2}):(\d{2}),(\d{3})\s+-->\s+(\d{2}):(\d{2}):(\d{2}),(\d{3})$")
@@ -1059,11 +1094,13 @@ def clips_search(payload: ClipSearchRequest):
                 "start": start,
                 "end": end,
                 "clip_path": str(clip_path) if clip_path else None,
-                "clip_url": f"/static/{clip_rel.as_posix()}" if clip_rel else None,
+                "clip_url": f"/serve-clip?path={clip_rel.as_posix()}" if clip_rel else None,
                 "llm_summary": seg.get("summary"),
             })
 
-        return {"results": results, "count": len(results)}
+        # Generate topic explanation
+        topic_explanation = _generate_topic_explanation(payload.query, results)
+        return {"results": results, "count": len(results), "topic_explanation": topic_explanation}
 
     # ── Strategy 2: Embedding-based search (fallback) ──
     print("[clips/search] Gemini unavailable or returned no results — using embedding search")
@@ -1229,7 +1266,7 @@ def clips_search(payload: ClipSearchRequest):
             "start": start,
             "end": end,
             "clip_path": str(clip_path) if clip_path else None,
-            "clip_url": f"/static/{clip_rel.as_posix()}" if clip_rel else None,
+            "clip_url": f"/serve-clip?path={clip_rel.as_posix()}" if clip_rel else None,
             "llm_summary": None,
         })
 
@@ -1247,7 +1284,10 @@ def clips_search(payload: ClipSearchRequest):
     except Exception as e:
         print(f"LLM enrichment failed in clips_search: {e}")
 
-    return {"results": results, "count": len(results)}
+    # Generate topic explanation
+    topic_explanation = _generate_topic_explanation(payload.query, results)
+
+    return {"results": results, "count": len(results), "topic_explanation": topic_explanation}
 
 class UploadAndSearchResponse(BaseModel):
     job_id: str
@@ -1255,6 +1295,7 @@ class UploadAndSearchResponse(BaseModel):
     srt_path: str
     results: list
     count: int
+    topic_explanation: str = ""
 
 @app.post("/upload-and-search")
 async def upload_and_search(
@@ -1506,7 +1547,7 @@ async def upload_and_search(
             rerank=rerank
         )
         r = clips_search(payload)
-        return UploadAndSearchResponse(job_id=job_id, json_path=str(json_path), srt_path=str(srt_out), results=r["results"], count=r["count"])
+        return UploadAndSearchResponse(job_id=job_id, json_path=str(json_path), srt_path=str(srt_out), results=r["results"], count=r["count"], topic_explanation=r.get("topic_explanation", ""))
     except HTTPException:
         raise
     except Exception as e:
@@ -1798,6 +1839,50 @@ Respond ONLY with valid JSON:
     except Exception as e:
         print(f"LLM refinement failed: {e}")
         return []
+
+
+def _generate_topic_explanation(query: str, results: list) -> str:
+    """
+    Generate a comprehensive explanation of the topic the user is searching for,
+    based on the found video segments. Returns a text paragraph.
+    """
+    groq_key = os.getenv("GROQ_API_KEY", "").strip()
+    google_key = os.getenv("GOOGLE_API_KEY", "").strip()
+    if not groq_key and not google_key:
+        return ""
+    if not results:
+        return ""
+
+    segments_context = ""
+    for r in results[:5]:
+        text = r.get("text", "") or r.get("llm_summary", "")
+        if text:
+            segments_context += f"- [{r['start']:.1f}s - {r['end']:.1f}s]: {text[:300]}\n"
+    if not segments_context:
+        return ""
+
+    prompt = f"""Based on the following video segments found for the query "{query}", write a comprehensive 3-5 sentence explanation about this topic as discussed in the video.
+
+Write in a clear, informative style. Focus on:
+1. What the video covers about this topic
+2. Key points and details mentioned
+3. The overall context and significance
+
+Video Segments:
+{segments_context}
+
+Respond ONLY with valid JSON:
+{{
+  "explanation": "Your detailed explanation here..."
+}}"""
+
+    try:
+        response_text = _llm_generate(prompt, max_tokens=1024)
+        parsed = _parse_llm_json(response_text)
+        return parsed.get("explanation", "")
+    except Exception as e:
+        print(f"[LLM] Topic explanation generation failed: {e}")
+        return ""
 
 
 @app.post("/clips/search-db")

@@ -37,6 +37,7 @@ type ResultData = {
   duration: number;
   originalDuration: number;
   clips?: ClipItem[];
+  topicExplanation?: string;
 };
 
 const processingSchema = z.object({
@@ -172,6 +173,7 @@ export default function Summarization() {
           duration: endTime - startTime,
           originalDuration: endTime,
           clips,
+          topicExplanation: uploadData.topic_explanation,
         });
       } else if (url) {
         setCurrentStep(0);
@@ -220,6 +222,7 @@ export default function Summarization() {
           duration: endTime - startTime,
           originalDuration: endTime,
           clips,
+          topicExplanation: searchJson.topic_explanation,
         });
       }
 
@@ -386,7 +389,17 @@ export default function Summarization() {
                   </div>
                 ))}
               </div>
-              <Button variant="outline" onClick={handleReset} className="w-full">
+
+              {result?.topicExplanation && (
+                <div className="mt-8 p-6 rounded-xl bg-violet-500/10 border border-violet-500/20">
+                  <h3 className="text-lg font-bold text-violet-300 mb-2">Topic Overview</h3>
+                  <p className="text-foreground/80 leading-relaxed text-sm">
+                    {result.topicExplanation}
+                  </p>
+                </div>
+              )}
+
+              <Button variant="outline" onClick={handleReset} className="w-full mt-6">
                 <RotateCcw className="mr-2 h-4 w-4" /> Process Another Video
               </Button>
             </CardContent>

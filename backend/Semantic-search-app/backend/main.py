@@ -184,13 +184,9 @@ def get_requests_session():
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:8030",
-        "http://localhost:8080",
-        "http://localhost:8081",
-    ], 
-    allow_credentials=True,
-    allow_methods=["GET", "POST"],
+    allow_origins=["*"],  # Allow all origins (ngrok, localhost, deployed frontend)
+    allow_credentials=False,  # Must be False when using wildcard origins
+    allow_methods=["*"],
     allow_headers=["*"],
 )
 
@@ -512,25 +508,17 @@ def process_video_workflow(
     
     try:
         ocr_text_data = []
-        # custom_model_training is in the NeuroClip root (one level up from REPO_ROOT)
-        # Try to find model in Kaggle datasets first
-        model_path = REPO_ROOT.parent / "custom_model_training" / "neuroclip_v1.pth"
-        kaggle_input = Path("/kaggle/input")
-        if kaggle_input.exists():
-            found_models = list(kaggle_input.glob("**/neuroclip_v1.pth"))
-            if found_models:
-                model_path = found_models[0]
-        ocr_model = load_ocr_model(str(model_path))
-        if ocr_model:
-            frames_dir = output_dir / "frames" / job_id
-            print(f"Extracting high-value frames to {frames_dir}...")
-            count = extract_high_value_frames(saved_path, frames_dir, ocr_model)
-            if count > 0:
-                print(f"Extracted {count} frames. Running OCR...")
-                ocr_text_data = run_ocr_on_frames(frames_dir)
-                print(f"OCR extracted text from {len(ocr_text_data)} frames.")
+        from ocr_utils import extract_all_video_frames, run_ocr_on_frames as ocr_run
+        frames_dir = output_dir / "frames" / job_id
+        print(f"[OCR] Starting full-video frame extraction to {frames_dir}...")
+        count = extract_all_video_frames(saved_path, frames_dir)
+        if count > 0:
+            ocr_text_data = ocr_run(frames_dir)
+            print(f"[OCR] Completed: {len(ocr_text_data)} frames contained text")
+        else:
+            print("[OCR] No frames could be extracted from video")
     except Exception as e:
-        print(f"OCR/Frame extraction failed: {e}")
+        print(f"[OCR ERROR] OCR/Frame extraction failed: {e}")
 
     srt_out = output_dir / f"{saved_path.stem}.srt"
     
@@ -960,7 +948,7 @@ class ClipSearchRequest(BaseModel):
 
 @app.post("/clips/search")
 def clips_search(payload: ClipSearchRequest):
-    out_dir = Path(__file__).resolve().parents[2] / "backend" / "output_data"
+    out_dir = REPO_ROOT / "output_data"
     if not payload.json_path and not payload.job_id:
         raise HTTPException(status_code=400, detail="Provide json_path or job_id")
     if payload.json_path:
@@ -1287,7 +1275,7 @@ async def upload_and_search(
         base_dir = Path(os.getenv("APP_BASE_DIR") or Path(__file__).resolve().parent)
         uploads_dir = base_dir / "uploads"
         uploads_dir.mkdir(parents=True, exist_ok=True)
-        output_dir = Path(__file__).resolve().parents[2] / "backend" / "output_data"
+        output_dir = REPO_ROOT / "output_data"
         output_dir.mkdir(parents=True, exist_ok=True)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -1342,24 +1330,21 @@ async def upload_and_search(
             "verbs": []
         }]
 
-    # Note: upload-and-search is a faster path, but for consistency we should 
-    # ideal run OCR here too if we want enhanced accuracy. 
-    # However, to keep it simple, we'll focus on the primary process_video_workflow.
-    # We'll add OCR here as well for full coverage.
+    # --- OCR: Extract text from video frames (runs on ENTIRE video) ---
     ocr_text_data = []
     try:
-        # Try to find model in Kaggle datasets first
-        model_path = Path(__file__).resolve().parents[2] / "custom_model_training" / "neuroclip_v1.pth"
-        kaggle_input = Path("/kaggle/input")
-        if kaggle_input.exists():
-            found_models = list(kaggle_input.glob("**/neuroclip_v1.pth"))
-            if found_models:
-                model_path = found_models[0]
-        ocr_model = load_ocr_model(str(model_path))
-        if ocr_model:
-            frames_dir = output_dir / "frames" / job_id
-            extract_high_value_frames(saved_path, frames_dir, ocr_model)
-            ocr_text_data = run_ocr_on_frames(frames_dir)
+        from ocr_utils import extract_all_video_frames, run_ocr_on_frames as ocr_run
+        frames_dir = output_dir / "frames" / job_id
+        print(f"[OCR] Starting full-video OCR extraction...")
+        frame_count = extract_all_video_frames(saved_path, frames_dir)
+        if frame_count > 0:
+            ocr_text_data = ocr_run(frames_dir)
+            print(f"[OCR] Completed: {len(ocr_text_data)} frames contained readable text")
+        else:
+            print("[OCR] No frames could be extracted from video")
+
+        # Merge OCR text into transcript sentences
+        if ocr_text_data:
             for ocr_item in ocr_text_data:
                 ts = ocr_item["timestamp"]
                 text = ocr_item["text"]
@@ -1385,6 +1370,7 @@ async def upload_and_search(
                         "verbs": ["visual_ocr"]
                     })
             sentences.sort(key=lambda x: float(x["starttime"]))
+            print(f"[OCR] Merged {len(ocr_text_data)} OCR results into transcript")
     except Exception as e:
         import traceback
         print(f"[OCR ERROR] OCR in upload-and-search failed: {e}")
@@ -1587,26 +1573,15 @@ def get_cross_encoder():
             cross_encoder = None
     return cross_encoder
 
-# --- LLM Refinement via Google Gemini ---
-_gemini_model = None
+# --- LLM Provider: Groq (primary) + Gemini (fallback) ---
+# Groq free tier: 30 RPM, 14,400 RPD with Llama 3.3 70B
+# Sign up at https://console.groq.com for a free API key
 
-def get_gemini_model():
-    global _gemini_model
-    if _gemini_model is None:
-        api_key = os.getenv("GOOGLE_API_KEY", "").strip()
-        if not api_key:
-            return None
-        try:
-            import google.generativeai as genai
-            genai.configure(api_key=api_key)
-            _gemini_model = genai.GenerativeModel("gemini-2.0-flash")
-        except Exception as e:
-            print(f"Gemini init failed: {e}")
-            _gemini_model = None
-    return _gemini_model
+GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions"
+GROQ_MODEL = "llama-3.3-70b-versatile"  # Best free model on Groq
 
-def _parse_gemini_json(text: str) -> dict:
-    """Parse JSON from Gemini response, stripping markdown fences if present."""
+def _parse_llm_json(text: str) -> dict:
+    """Parse JSON from LLM response, stripping markdown fences if present."""
     text = text.strip()
     if text.startswith("```"):
         text = text.split("\n", 1)[1] if "\n" in text else text[3:]
@@ -1616,28 +1591,92 @@ def _parse_gemini_json(text: str) -> dict:
         text = text[4:].strip()
     return json.loads(text)
 
+
+def _llm_generate(prompt: str, max_tokens: int = 4096) -> str:
+    """
+    Unified LLM generation function. Tries providers in order:
+    1. Groq (GROQ_API_KEY) — free, fast, generous limits
+    2. Gemini (GOOGLE_API_KEY) — fallback
+    
+    Returns the response text, or raises an exception if all providers fail.
+    """
+    errors = []
+    
+    # --- Provider 1: Groq ---
+    groq_key = os.getenv("GROQ_API_KEY", "").strip()
+    if groq_key:
+        try:
+            headers = {
+                "Authorization": f"Bearer {groq_key}",
+                "Content-Type": "application/json",
+            }
+            payload = {
+                "model": GROQ_MODEL,
+                "messages": [{"role": "user", "content": prompt}],
+                "temperature": 0.3,
+                "max_tokens": max_tokens,
+                "response_format": {"type": "json_object"},
+            }
+            
+            # Retry with backoff for transient rate limits
+            for attempt in range(3):
+                resp = requests.post(GROQ_API_URL, json=payload, headers=headers, timeout=60)
+                if resp.status_code == 200:
+                    data = resp.json()
+                    return data["choices"][0]["message"]["content"]
+                elif resp.status_code == 429:
+                    # Rate limited
+                    retry_after = int(resp.headers.get("retry-after", 4 * (2 ** attempt)))
+                    print(f"[Groq] Rate limited — retrying in {retry_after}s (attempt {attempt+1}/3)")
+                    time.sleep(retry_after)
+                    continue
+                else:
+                    err_msg = resp.text[:200]
+                    errors.append(f"Groq HTTP {resp.status_code}: {err_msg}")
+                    break
+            else:
+                errors.append("Groq: all retries exhausted")
+        except Exception as e:
+            errors.append(f"Groq error: {e}")
+    
+    # --- Provider 2: Gemini (fallback) ---
+    google_key = os.getenv("GOOGLE_API_KEY", "").strip()
+    if google_key:
+        try:
+            import google.generativeai as genai
+            genai.configure(api_key=google_key)
+            model = genai.GenerativeModel("gemini-2.0-flash")
+            response = model.generate_content(prompt)
+            return response.text
+        except Exception as e:
+            err_str = str(e)
+            if "PerDay" in err_str or "limit: 0" in err_str:
+                errors.append("Gemini: daily quota exhausted")
+            else:
+                errors.append(f"Gemini error: {e}")
+    
+    # All providers failed
+    if not groq_key and not google_key:
+        raise RuntimeError("No LLM API key set. Set GROQ_API_KEY (recommended) or GOOGLE_API_KEY.")
+    raise RuntimeError(f"All LLM providers failed: {'; '.join(errors)}")
+
+
 def gemini_intelligent_search(query: str, sentences: list, top_k: int = 10) -> list:
     """
-    Use Gemini to reason about the FULL transcript and find ALL segments
-    that match the user's query. This is smarter than pure embedding
-    similarity because Gemini can understand context, synonyms, and intent.
-    
-    Args:
-        query: User's search query
-        sentences: Full list of transcript sentences with timestamps
-        top_k: Maximum number of segments to return
+    Use LLM to reason about the FULL transcript and find ALL segments
+    that match the user's query. Works with Groq (primary) or Gemini (fallback).
     
     Returns:
         List of dicts: [{"start": float, "end": float, "summary": str, "relevance": str}]
-        Returns empty list if Gemini is unavailable (caller should fall back to embeddings).
+        Returns empty list if LLM is unavailable (caller should fall back to embeddings).
     """
-    model = get_gemini_model()
-    if model is None:
-        print("[Gemini] API key not set — falling back to embedding search")
+    groq_key = os.getenv("GROQ_API_KEY", "").strip()
+    google_key = os.getenv("GOOGLE_API_KEY", "").strip()
+    if not groq_key and not google_key:
+        print("[LLM] No API key set (GROQ_API_KEY or GOOGLE_API_KEY) — falling back to embedding search")
         return []
     
-    # Build a condensed transcript with timestamps for Gemini
-    # Group sentences into chunks of ~5 to reduce token count
+    # Build a condensed transcript with timestamps
     CHUNK_SIZE = 5
     chunks = []
     for i in range(0, len(sentences), CHUNK_SIZE):
@@ -1649,7 +1688,7 @@ def gemini_intelligent_search(query: str, sentences: list, top_k: int = 10) -> l
     
     transcript_text = "\n".join(chunks)
     
-    # Limit transcript to ~12000 chars to stay within token limits
+    # Limit to ~12000 chars for token safety
     if len(transcript_text) > 12000:
         transcript_text = transcript_text[:12000] + "\n[... transcript truncated ...]"
     
@@ -1670,7 +1709,7 @@ User Query: "{query}"
 Full Video Transcript (with timestamps):
 {transcript_text}
 
-Respond ONLY with valid JSON (no markdown fences, no explanation):
+Respond ONLY with valid JSON:
 {{
   "reasoning": "Brief explanation of what the user is looking for and how you identified relevant segments",
   "segments": [
@@ -1684,14 +1723,16 @@ Respond ONLY with valid JSON (no markdown fences, no explanation):
 }}"""
     
     try:
-        print(f"[Gemini] Searching transcript ({len(sentences)} sentences) for: {query[:80]}...")
-        response = model.generate_content(prompt)
-        parsed = _parse_gemini_json(response.text)
+        provider = "Groq" if groq_key else "Gemini"
+        print(f"[{provider}] Searching transcript ({len(sentences)} sentences) for: {query[:80]}...")
+        
+        response_text = _llm_generate(prompt)
+        parsed = _parse_llm_json(response_text)
         segments = parsed.get("segments", [])
         reasoning = parsed.get("reasoning", "")
         if reasoning:
-            print(f"[Gemini] Reasoning: {reasoning[:200]}")
-        print(f"[Gemini] Found {len(segments)} relevant segments")
+            print(f"[{provider}] Reasoning: {reasoning[:200]}")
+        print(f"[{provider}] Found {len(segments)} relevant segments")
         
         # Validate and clean segments
         valid_segments = []
@@ -1711,19 +1752,20 @@ Respond ONLY with valid JSON (no markdown fences, no explanation):
         
         return valid_segments[:top_k]
     except Exception as e:
-        print(f"[Gemini] Intelligent search failed: {e}")
-        import traceback; traceback.print_exc()
+        print(f"[LLM] Intelligent search failed: {e}")
         return []
+
 
 def refine_with_llm(query: str, candidates: list) -> list:
     """
-    Send candidate transcript segments to Gemini LLM for refinement/summary.
+    Send candidate transcript segments to LLM for refinement/summary.
     Each candidate: {"index": int, "text": str, "start": float, "end": float}
     Returns list of {"segment_index": int, "start": float, "end": float, "summary": str}
     Falls back to empty list on any failure.
     """
-    model = get_gemini_model()
-    if model is None:
+    groq_key = os.getenv("GROQ_API_KEY", "").strip()
+    google_key = os.getenv("GOOGLE_API_KEY", "").strip()
+    if not groq_key and not google_key:
         return []
     
     segments_text = ""
@@ -1737,7 +1779,7 @@ User Query: "{query}"
 Transcript Segments:
 {segments_text}
 
-Respond ONLY with valid JSON (no markdown fences):
+Respond ONLY with valid JSON:
 {{
   "results": [
     {{
@@ -1750,8 +1792,8 @@ Respond ONLY with valid JSON (no markdown fences):
 }}"""
     
     try:
-        response = model.generate_content(prompt)
-        parsed = _parse_gemini_json(response.text)
+        response_text = _llm_generate(prompt, max_tokens=2048)
+        parsed = _parse_llm_json(response_text)
         return parsed.get("results", [])
     except Exception as e:
         print(f"LLM refinement failed: {e}")
@@ -1764,7 +1806,7 @@ def clips_search_db(payload: DbSearchRequest):
         raise HTTPException(status_code=500, detail="Supabase not configured")
     try:
         # Locate JSON by job_id instead of user_videos
-        out_dir = Path(__file__).resolve().parents[2] / "backend" / "output_data"
+        out_dir = REPO_ROOT / "output_data"
         matches = list(out_dir.glob(f"{payload.job_id}_*.v4.json"))
         if not matches:
             raise HTTPException(status_code=404, detail="JSON not found for job_id")

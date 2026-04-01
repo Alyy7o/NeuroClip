@@ -1,253 +1,170 @@
-import torch
-try:
-    import spaces
-except ImportError:
-    # Fallback for local execution
-    class spaces:
-        @staticmethod
-        def GPU(func):
-            return func
-import torch.nn as nn
-from torchvision import models, transforms
-from transformers import DistilBertModel, DistilBertTokenizer
-from PIL import Image
-import torch.nn.functional as F
 import os
 import cv2
-from tqdm.auto import tqdm
 from pathlib import Path
 
 # ====================
 # CONFIGURATION
 # ====================
-DEVICE = "cuda:0" if torch.cuda.is_available() else "cpu"
-if DEVICE == "cuda:0":
-    try:
-        torch.cuda.set_device(0)
-        # Flush CUDA memory to ensure T4 is ready
-        torch.cuda.empty_cache()
-    except Exception as e:
-        print(f"--- [GPU] CUDA initialization failed: {e} ---")
-        DEVICE = "cpu"
+# Frame sampling: extract 1 frame every SAMPLE_INTERVAL seconds
+SAMPLE_INTERVAL = 3.0  # seconds between sampled frames
+MIN_TEXT_LENGTH = 4     # minimum characters to keep OCR result
 
-print(f"--- [NeuroClip OCR] ACTIVE DEVICE: {DEVICE.upper()} ---")
-CONFIDENCE_THRESHOLD = 0.30
-DUPLICATE_THRESHOLD = 0.85
-MIN_SLIDE_INTERVAL = 3.0
-
-TARGET_QUERIES = [
-    "slide presentation",
-    "powerpoint slide",
-    "whiteboard with writing",
-    "computer code on screen",
-    "text document screenshot",
-    "diagram and chart"
-]
-
-DISTRACTOR_QUERIES = [
-    "person speaking facing camera",
-    "blur background",
-    "crowd of people",
-    "outdoor scenery",
-    "advertisement / logo"
-]
+print(f"--- [NeuroClip OCR] Direct EasyOCR mode (every {SAMPLE_INTERVAL}s) ---")
 
 # ====================
-# MODEL DEFINITION
+# FRAME EXTRACTION
 # ====================
-class CustomNeuroClip(nn.Module):
-    def __init__(self, embed_dim=256):
-        super(CustomNeuroClip, self).__init__()
-        
-        # Image Encoder - ResNet50 to match trained checkpoint weights
-        try:
-            weights = models.ResNet50_Weights.IMAGENET1K_V1
-            resnet = models.resnet50(weights=weights)
-        except:
-            resnet = models.resnet50(pretrained=True)
-            
-        self.image_encoder = nn.Sequential(*list(resnet.children())[:-1])
-        self.image_projection = nn.Linear(2048, embed_dim)
-        
-        # Text Encoder
-        self.text_encoder = DistilBertModel.from_pretrained("distilbert-base-uncased")
-        self.text_projection = nn.Linear(768, embed_dim)
 
-    def forward(self, images, input_ids, attention_mask):
-        img_feat = self.image_encoder(images).flatten(1)
-        image_embeddings = self.image_projection(img_feat)
-        
-        text_out = self.text_encoder(input_ids=input_ids, attention_mask=attention_mask)
-        text_feat = text_out.last_hidden_state[:, 0, :]
-        text_embeddings = self.text_projection(text_feat)
-        
-        return image_embeddings, text_embeddings
-
-def get_transforms():
-    return transforms.Compose([
-        transforms.Resize((224, 224)),
-        transforms.ToTensor(),
-        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
-    ])
-
-def load_ocr_model(path):
-    # --- Kaggle Dataset Support ---
-    # On Kaggle, datasets are added to /kaggle/input/dataset-name/*.pth
-    # We search for our specific model filename in the entire input dir.
-    kaggle_input = Path("/kaggle/input")
-    if kaggle_input.exists():
-        found_models = list(kaggle_input.glob("**/neuroclip_v1.pth"))
-        if found_models:
-            path = str(found_models[0])
-            print(f"--- [GPU] Loading model from Kaggle Dataset: {path} ---")
-
-    model = CustomNeuroClip(embed_dim=256)
-    try:
-        if os.path.exists(path):
-            state_dict = torch.load(path, map_location=DEVICE)
-            # Load with strict=False to ignore unexpected keys (e.g. vocab layers)
-            missing, unexpected = model.load_state_dict(state_dict, strict=False)
-            if missing:
-                print(f"[OCR] Missing keys (may affect accuracy): {missing[:5]}...")
-            if unexpected:
-                print(f"[OCR] Unexpected keys (safe to ignore): {unexpected[:5]}...")
-            print(f"OCR Model weights loaded from {path}.")
-        else:
-            print(f"[OCR WARNING] Model file not found at {path}. OCR extraction will be SKIPPED.")
-            return None
-    except Exception as e:
-        import traceback
-        print(f"[OCR ERROR] Failed to load model weights: {e}")
-        traceback.print_exc()
-        return None
-    model.to(DEVICE)
-    model.eval()
-    return model
-
-@spaces.GPU
-def extract_high_value_frames(video_path, output_dir, model, threshold=CONFIDENCE_THRESHOLD):
-    if model is None:
-        return 0
-        
+def extract_all_video_frames(video_path, output_dir, sample_interval=SAMPLE_INTERVAL):
+    """
+    Extract frames from the ENTIRE video at regular intervals.
+    No model-based filtering — every Nth second frame is saved for OCR.
+    
+    Args:
+        video_path: Path to the video file
+        output_dir: Directory to save extracted frames
+        sample_interval: Seconds between frame captures (default 3.0)
+    
+    Returns:
+        Number of frames extracted
+    """
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
-        
+    
     cap = cv2.VideoCapture(str(video_path))
     if not cap.isOpened():
-        print(f"Error: Could not open video {video_path}")
+        print(f"[OCR] Error: Could not open video {video_path}")
         return 0
-
+    
     fps = cap.get(cv2.CAP_PROP_FPS)
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-    if fps <= 0: fps = 24.0
+    if fps <= 0:
+        fps = 24.0
     
-    # Prepare Query Embeddings
-    tokenizer = DistilBertTokenizer.from_pretrained("distilbert-base-uncased")
-    all_queries = TARGET_QUERIES + DISTRACTOR_QUERIES
-    encoded_text = tokenizer(all_queries, padding=True, truncation=True, max_length=128, return_tensors="pt").to(DEVICE)
+    duration = total_frames / fps
+    frame_interval = int(fps * sample_interval)
+    if frame_interval < 1:
+        frame_interval = 1
     
-    transform = get_transforms()
+    print(f"[OCR] Video: {duration:.1f}s, {fps:.1f}fps, {total_frames} total frames")
+    print(f"[OCR] Sampling 1 frame every {sample_interval}s ({total_frames // frame_interval} frames to process)")
     
-    # Process 1 frame every 2 seconds (faster on CPU)
-    frame_interval = int(fps * 2.0) 
     current_frame = 0
     saved_count = 0
     
-    last_saved_emb = None
-    last_saved_time = -999.0 
+    while current_frame < total_frames:
+        cap.set(cv2.CAP_PROP_POS_FRAMES, current_frame)
+        ret, frame = cap.read()
+        if not ret:
+            break
+        
+        timestamp_s = current_frame / fps
+        filename = f"frame_{int(timestamp_s):05d}s.jpg"
+        save_path = output_dir / filename
+        cv2.imwrite(str(save_path), frame)
+        saved_count += 1
+        
+        current_frame += frame_interval
     
-    with torch.no_grad():
-        while current_frame < total_frames:
-            cap.set(cv2.CAP_PROP_POS_FRAMES, current_frame)
-            ret, frame = cap.read()
-            if not ret:
-                break
-            
-            # Prepare Image
-            frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            pil_img = Image.fromarray(frame_rgb)
-            img_tensor = transform(pil_img).unsqueeze(0).to(DEVICE)
-            
-            # Inference
-            img_emb, txt_emb = model(img_tensor, encoded_text['input_ids'], encoded_text['attention_mask'])
-            img_emb = F.normalize(img_emb, p=2, dim=1)
-            txt_emb = F.normalize(txt_emb, p=2, dim=1)
-            
-            # Scores
-            similarity = torch.matmul(img_emb, txt_emb.T).squeeze(0)
-            target_scores = similarity[:len(TARGET_QUERIES)]
-            distractor_scores = similarity[len(TARGET_QUERIES):]
-            
-            max_target = target_scores.max().item()
-            max_distractor = distractor_scores.max().item()
-            
-            # LOGIC: Confident enough AND better than distractor
-            if max_target >= threshold and max_target > max_distractor:
-                timestamp_s = current_frame / fps
-                should_save = True
-                
-                # Deduplication
-                if last_saved_emb is not None:
-                    sim_to_last = torch.cosine_similarity(img_emb, last_saved_emb).item()
-                    time_diff = timestamp_s - last_saved_time
-                    
-                    if sim_to_last > DUPLICATE_THRESHOLD: 
-                        should_save = False
-                    if time_diff < MIN_SLIDE_INTERVAL and sim_to_last > 0.60:
-                        should_save = False
-
-                if should_save:
-                    filename = f"slide_{int(timestamp_s):04d}s.jpg"
-                    save_path = output_dir / filename
-                    cv2.imwrite(str(save_path), frame)
-                    saved_count += 1
-                    last_saved_emb = img_emb.clone()
-                    last_saved_time = timestamp_s
-            
-            current_frame += frame_interval
-            
     cap.release()
+    print(f"[OCR] Extracted {saved_count} frames from video ({duration:.1f}s)")
     return saved_count
 
-def run_ocr_on_frames(image_folder):
+
+def run_ocr_on_frames(image_folder, min_text_length=MIN_TEXT_LENGTH):
     """
-    Runs EasyOCR on images in image_folder and returns a list of dictionaries:
-    {'timestamp': float, 'text': str}
+    Runs EasyOCR on all images in image_folder.
+    Returns list of dicts: [{'timestamp': float, 'text': str}]
+    Only keeps frames where meaningful text was detected.
     """
     image_folder = Path(image_folder)
     if not image_folder.exists():
+        print(f"[OCR] Frame folder not found: {image_folder}")
         return []
 
     try:
         import easyocr
-        reader = easyocr.Reader(['en'], gpu=(DEVICE.startswith("cuda")))
+        # Check for GPU
+        use_gpu = False
+        try:
+            import torch
+            use_gpu = torch.cuda.is_available()
+        except ImportError:
+            pass
+        reader = easyocr.Reader(['en'], gpu=use_gpu)
+        print(f"[OCR] EasyOCR initialized (GPU: {use_gpu})")
     except ImportError:
-        print("[OCR WARNING] EasyOCR not installed. Install with: pip install easyocr. Skipping text extraction.")
+        print("[OCR WARNING] EasyOCR not installed. Install with: pip install easyocr")
         return []
     except Exception as e:
         print(f"[OCR ERROR] EasyOCR initialization failed: {e}")
         return []
 
     files = sorted([f for f in os.listdir(image_folder) if f.endswith('.jpg')])
-    results = []
+    if not files:
+        print(f"[OCR] No JPG frames found in {image_folder}")
+        return []
     
-    for filename in files:
+    print(f"[OCR] Running OCR on {len(files)} frames...")
+    results = []
+    frames_with_text = 0
+    
+    for i, filename in enumerate(files):
         try:
-            # Extract timestamp from filename: slide_0045s.jpg -> 45
-            seconds = int(filename.replace("slide_", "").replace("s.jpg", ""))
-        except:
+            # Extract timestamp from filename: frame_00045s.jpg -> 45
+            ts_str = filename.replace("frame_", "").replace("slide_", "").replace("s.jpg", "")
+            seconds = int(ts_str)
+        except (ValueError, IndexError):
             seconds = 0
 
         path = image_folder / filename
-        ocr_result = reader.readtext(str(path), detail=0) 
+        try:
+            ocr_result = reader.readtext(str(path), detail=0)
+        except Exception as e:
+            print(f"[OCR] Failed on {filename}: {e}")
+            continue
         
-        # Filter short junk text
-        clean_text = [text for text in ocr_result if len(text.strip()) > 3]
+        # Filter short junk text (< min_text_length chars)
+        clean_text = [text.strip() for text in ocr_result if len(text.strip()) >= min_text_length]
+        
         if clean_text:
             full_content = " ".join(clean_text)
             results.append({
                 "timestamp": float(seconds),
                 "text": full_content
             })
-            
+            frames_with_text += 1
+        
+        # Progress logging every 20 frames
+        if (i + 1) % 20 == 0:
+            print(f"[OCR] Progress: {i+1}/{len(files)} frames processed, {frames_with_text} with text")
+    
+    print(f"[OCR] Complete: {frames_with_text}/{len(files)} frames contained text ({len(results)} results)")
     return results
+
+
+# ====================
+# LEGACY COMPATIBILITY
+# ====================
+# Keep old function signatures so existing code doesn't break
+
+def load_ocr_model(path=None):
+    """
+    Legacy wrapper — no longer needed since we use direct EasyOCR.
+    Returns a sentinel value so callers know OCR is available.
+    """
+    # Just check if EasyOCR is importable
+    try:
+        import easyocr
+        print("[OCR] EasyOCR available — direct OCR mode active")
+        return True  # Return truthy value so callers proceed
+    except ImportError:
+        print("[OCR WARNING] EasyOCR not installed")
+        return None
+
+
+def extract_high_value_frames(video_path, output_dir, model=None, threshold=None):
+    """
+    Legacy wrapper — now extracts ALL frames uniformly instead of model-filtered ones.
+    """
+    return extract_all_video_frames(video_path, output_dir, sample_interval=SAMPLE_INTERVAL)

@@ -128,7 +128,8 @@ def get_model():
         elif EMBEDDING_BACKEND == "openclip":
             try:
                 import open_clip
-                import torch
+                # NOTE: Do NOT import torch here — it shadows the global import
+                # and causes UnboundLocalError in the sentence-transformers branch
                 class _OpenClipEncoder:
                     def __init__(self, device):
                         self.device = device
@@ -592,22 +593,30 @@ def process_video_workflow(
 
     sentences = parse_srt_blocks(srt_text)
     
-    # Merge OCR text into sentences
+    # Merge OCR text into sentences — attach to the BEST matching sentence
     if ocr_text_data and sentences:
         for ocr_item in ocr_text_data:
             ts = ocr_item["timestamp"]
             text = ocr_item["text"]
-            # Find closest sentence or append as new context
-            found = False
+            # Find the best-matching sentence by proximity
+            best_match = None
+            best_dist = float('inf')
             for s in sentences:
                 s_start = float(s["starttime"])
                 s_end = float(s["endtime"])
-                # If OCR timestamp falls within or near the sentence, append
-                if s_start <= ts <= s_end or abs(s_start - ts) < 2.0:
-                    s["sentence"] += f" [On Screen: {text}]"
-                    found = True
-                    break
-            if not found:
+                # If OCR timestamp falls within the sentence window
+                if s_start <= ts <= s_end:
+                    best_match = s
+                    best_dist = 0
+                    break  # Exact match, no need to look further
+                # Otherwise track closest sentence within 5-second window
+                dist = min(abs(s_start - ts), abs(s_end - ts))
+                if dist < 5.0 and dist < best_dist:
+                    best_dist = dist
+                    best_match = s
+            if best_match is not None:
+                best_match["sentence"] += f" [On Screen: {text}]"
+            else:
                 # Add as a new "synthetic" sentence if no match found
                 sentences.append({
                     "sentence": f"[Visual Content]: {text}",
@@ -970,6 +979,107 @@ def clips_search(payload: ClipSearchRequest):
     sentences = data.get("sentences") or []
     if not sentences:
         raise HTTPException(status_code=400, detail="No sentences in JSON")
+
+    video_path = str(data.get("metadata", {}).get("file"))
+    if not video_path:
+        raise HTTPException(status_code=400, detail="Video path missing in metadata")
+    clips_dir = out_dir / "clips" / (json_path.stem.split("_")[0])
+    clips_dir.mkdir(parents=True, exist_ok=True)
+
+    # ── Strategy 1: Gemini Intelligent Search (reasoning-based) ──
+    gemini_segments = gemini_intelligent_search(payload.query, sentences, top_k=payload.top_k)
+    
+    if gemini_segments:
+        print(f"[clips/search] Using Gemini reasoning: {len(gemini_segments)} segments found")
+        results = []
+        for rank, seg in enumerate(gemini_segments, 1):
+            start = max(0.0, seg["start"] - payload.margin_secs)
+            end = seg["end"] + payload.margin_secs
+
+            # Clamp to video duration
+            try:
+                total = float(data.get("metadata", {}).get("duration") or 0)
+                if total > 0:
+                    end = min(end, total)
+            except Exception:
+                pass
+
+            # Enforce min/max clip duration
+            dur = end - start
+            if dur < payload.min_clip_secs:
+                end = start + payload.min_clip_secs
+                dur = payload.min_clip_secs
+            if dur > payload.max_clip_secs:
+                end = start + payload.max_clip_secs
+                dur = payload.max_clip_secs
+
+            # Re-clamp after adjustment
+            try:
+                total = float(data.get("metadata", {}).get("duration") or 0)
+                if total > 0 and end > total:
+                    end = total
+                    dur = max(0, end - start)
+            except Exception:
+                pass
+
+            # Build transcript text for this time range
+            text_segment = " ".join([
+                s.get("sentence", "") for s in sentences
+                if float(s.get("starttime", 0)) >= seg["start"] - 1
+                and float(s.get("endtime", 0)) <= seg["end"] + 1
+            ])
+
+            # Extract clip with ffmpeg
+            clip_path = clips_dir / f"clip_{rank:02d}.mp4"
+            import shutil, subprocess
+            ff = shutil.which("ffmpeg")
+            if not ff:
+                try:
+                    import imageio_ffmpeg
+                    ff = imageio_ffmpeg.get_ffmpeg_exe()
+                except Exception:
+                    ff = None
+            ok = False
+            if ff:
+                cmd = [
+                    ff, "-y",
+                    "-ss", str(start),
+                    "-i", video_path,
+                    "-t", str(dur),
+                    "-c:v", "libx264",
+                    "-c:a", "aac",
+                    "-movflags", "+faststart",
+                    str(clip_path),
+                ]
+                try:
+                    subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                    ok = clip_path.exists() and clip_path.stat().st_size > 1024
+                except Exception:
+                    ok = False
+            if not ok:
+                clip_path = None
+            clip_rel = clip_path.relative_to(out_dir) if clip_path else None
+
+            # Relevance score: map high=1.0, medium=0.7, low=0.4
+            relevance_map = {"high": 1.0, "medium": 0.7, "low": 0.4}
+            score = relevance_map.get(seg.get("relevance", "medium"), 0.7)
+
+            results.append({
+                "rank": rank,
+                "score": score,
+                "text": text_segment or seg.get("summary", ""),
+                "start": start,
+                "end": end,
+                "clip_path": str(clip_path) if clip_path else None,
+                "clip_url": f"/static/{clip_rel.as_posix()}" if clip_rel else None,
+                "llm_summary": seg.get("summary"),
+            })
+
+        return {"results": results, "count": len(results)}
+
+    # ── Strategy 2: Embedding-based search (fallback) ──
+    print("[clips/search] Gemini unavailable or returned no results — using embedding search")
+    
     emb_path = json_path.with_name(json_path.stem.replace(".v4", "") + ".embeddings.json")
     vectors = None
     try:
@@ -999,7 +1109,7 @@ def clips_search(payload: ClipSearchRequest):
         return math.sqrt(sum(x*x for x in a))
     q_vec = list(map(float, get_model().encode([payload.query])[0]))
     
-    # Advanced Search Logic (ported from clips_search_db)
+    # Advanced Search Logic (sliding window)
     candidates = []
     if payload.use_windows and len(vectors) >= payload.window_size:
         W = max(1, int(payload.window_size))
@@ -1060,15 +1170,9 @@ def clips_search(payload: ClipSearchRequest):
 
     top = preselect[: max(1, min(payload.top_k, len(preselect)))]
 
-    video_path = str(data.get("metadata", {}).get("file"))
-    if not video_path:
-        raise HTTPException(status_code=400, detail="Video path missing in metadata")
-    clips_dir = out_dir / "clips" / (json_path.stem.split("_")[0])
-    clips_dir.mkdir(parents=True, exist_ok=True)
     results = []
     
     for rank, (score, a, b) in enumerate(top, 1):
-        # Clip Extraction Logic using start/end indices 'a' and 'b'
         s0 = sentences[a]
         s1 = sentences[b]
         try:
@@ -1083,24 +1187,18 @@ def clips_search(payload: ClipSearchRequest):
         except Exception:
             pass
             
-        # Enforce min/max duration
         dur = max(payload.min_clip_secs, end - start)
-        
-        # Update 'end' to reflect the minimum duration extension
         if end - start < dur:
             end = start + dur
-
-        # Clamp to max duration
         if dur > payload.max_clip_secs:
             end = start + payload.max_clip_secs
             dur = payload.max_clip_secs
         
-        # Clamp end to total video duration if available
         try:
              total = float(data.get("metadata", {}).get("duration") or 0)
              if total > 0 and end > total:
                  end = total
-                 dur = max(0, end - start) # Recalculate duration if clamped
+                 dur = max(0, end - start)
         except Exception:
              pass
 
@@ -1134,7 +1232,6 @@ def clips_search(payload: ClipSearchRequest):
             clip_path = None
         clip_rel = clip_path.relative_to(out_dir) if clip_path else None
         
-        # Build text from range
         text_segment = " ".join([sentences[t].get("sentence") for t in range(a, b+1)])
         
         results.append({
@@ -1148,7 +1245,7 @@ def clips_search(payload: ClipSearchRequest):
             "llm_summary": None,
         })
 
-    # LLM refinement: enrich results with AI-generated summaries
+    # LLM refinement: enrich embedding-based results with summaries
     try:
         llm_candidates = [
             {"index": i, "text": r["text"], "start": r["start"], "end": r["end"]}
@@ -1266,13 +1363,21 @@ async def upload_and_search(
             for ocr_item in ocr_text_data:
                 ts = ocr_item["timestamp"]
                 text = ocr_item["text"]
-                found = False
+                best_match = None
+                best_dist = float('inf')
                 for s in sentences:
-                    if float(s["starttime"]) <= ts <= float(s["endtime"]) or abs(float(s["starttime"]) - ts) < 2.0:
-                        s["sentence"] += f" [On Screen: {text}]"
-                        found = True
+                    s_start = float(s["starttime"])
+                    s_end = float(s["endtime"])
+                    if s_start <= ts <= s_end:
+                        best_match = s
                         break
-                if not found:
+                    dist = min(abs(s_start - ts), abs(s_end - ts))
+                    if dist < 5.0 and dist < best_dist:
+                        best_dist = dist
+                        best_match = s
+                if best_match is not None:
+                    best_match["sentence"] += f" [On Screen: {text}]"
+                else:
                     sentences.append({
                         "sentence": f"[Visual Content]: {text}",
                         "starttime": f"{ts:.2f}",
@@ -1281,7 +1386,9 @@ async def upload_and_search(
                     })
             sentences.sort(key=lambda x: float(x["starttime"]))
     except Exception as e:
-        print(f"OCR in upload-and-search failed: {e}")
+        import traceback
+        print(f"[OCR ERROR] OCR in upload-and-search failed: {e}")
+        traceback.print_exc()
 
     duration_seconds = sentences[-1]["endtime"] if sentences else "0.00"
     if not sentences:
@@ -1498,11 +1605,121 @@ def get_gemini_model():
             _gemini_model = None
     return _gemini_model
 
+def _parse_gemini_json(text: str) -> dict:
+    """Parse JSON from Gemini response, stripping markdown fences if present."""
+    text = text.strip()
+    if text.startswith("```"):
+        text = text.split("\n", 1)[1] if "\n" in text else text[3:]
+    if text.endswith("```"):
+        text = text[:-3].strip()
+    if text.startswith("json"):
+        text = text[4:].strip()
+    return json.loads(text)
+
+def gemini_intelligent_search(query: str, sentences: list, top_k: int = 10) -> list:
+    """
+    Use Gemini to reason about the FULL transcript and find ALL segments
+    that match the user's query. This is smarter than pure embedding
+    similarity because Gemini can understand context, synonyms, and intent.
+    
+    Args:
+        query: User's search query
+        sentences: Full list of transcript sentences with timestamps
+        top_k: Maximum number of segments to return
+    
+    Returns:
+        List of dicts: [{"start": float, "end": float, "summary": str, "relevance": str}]
+        Returns empty list if Gemini is unavailable (caller should fall back to embeddings).
+    """
+    model = get_gemini_model()
+    if model is None:
+        print("[Gemini] API key not set — falling back to embedding search")
+        return []
+    
+    # Build a condensed transcript with timestamps for Gemini
+    # Group sentences into chunks of ~5 to reduce token count
+    CHUNK_SIZE = 5
+    chunks = []
+    for i in range(0, len(sentences), CHUNK_SIZE):
+        group = sentences[i:i+CHUNK_SIZE]
+        start_t = group[0].get("starttime", "0")
+        end_t = group[-1].get("endtime", "0")
+        text = " ".join(s.get("sentence", "") for s in group)
+        chunks.append(f"[{start_t}s - {end_t}s]: {text}")
+    
+    transcript_text = "\n".join(chunks)
+    
+    # Limit transcript to ~12000 chars to stay within token limits
+    if len(transcript_text) > 12000:
+        transcript_text = transcript_text[:12000] + "\n[... transcript truncated ...]"
+    
+    prompt = f"""You are an expert video content analyst. Your task is to carefully analyze a video transcript and find EVERY part of the video that is relevant to the user's query.
+
+IMPORTANT INSTRUCTIONS:
+1. Read the ENTIRE transcript carefully
+2. Identify ALL segments where the topic is discussed — not just the most obvious one
+3. Consider synonyms, related concepts, and indirect references
+4. If the user asks about a topic that appears in multiple places, return ALL of them
+5. Merge nearby segments (within 10 seconds) into a single result
+6. Return up to {top_k} segments, ranked by relevance (most relevant first)
+7. Each segment should have precise start/end timestamps from the transcript
+8. Include [On Screen] and [Visual Content] text in your analysis if present
+
+User Query: "{query}"
+
+Full Video Transcript (with timestamps):
+{transcript_text}
+
+Respond ONLY with valid JSON (no markdown fences, no explanation):
+{{
+  "reasoning": "Brief explanation of what the user is looking for and how you identified relevant segments",
+  "segments": [
+    {{
+      "start": 12.5,
+      "end": 45.3,
+      "summary": "2-3 sentence description of what is discussed in this segment",
+      "relevance": "high/medium/low"
+    }}
+  ]
+}}"""
+    
+    try:
+        print(f"[Gemini] Searching transcript ({len(sentences)} sentences) for: {query[:80]}...")
+        response = model.generate_content(prompt)
+        parsed = _parse_gemini_json(response.text)
+        segments = parsed.get("segments", [])
+        reasoning = parsed.get("reasoning", "")
+        if reasoning:
+            print(f"[Gemini] Reasoning: {reasoning[:200]}")
+        print(f"[Gemini] Found {len(segments)} relevant segments")
+        
+        # Validate and clean segments
+        valid_segments = []
+        for seg in segments:
+            try:
+                start = float(seg.get("start", 0))
+                end = float(seg.get("end", 0))
+                if end > start:
+                    valid_segments.append({
+                        "start": start,
+                        "end": end,
+                        "summary": seg.get("summary", ""),
+                        "relevance": seg.get("relevance", "medium"),
+                    })
+            except (ValueError, TypeError):
+                continue
+        
+        return valid_segments[:top_k]
+    except Exception as e:
+        print(f"[Gemini] Intelligent search failed: {e}")
+        import traceback; traceback.print_exc()
+        return []
+
 def refine_with_llm(query: str, candidates: list) -> list:
     """
-    Send candidate transcript segments to Gemini LLM for refinement.
+    Send candidate transcript segments to Gemini LLM for refinement/summary.
     Each candidate: {"index": int, "text": str, "start": float, "end": float}
-    Returns list of {"index": int, "start": float, "end": float, "summary": str}
+    Returns list of {"segment_index": int, "start": float, "end": float, "summary": str}
     Falls back to empty list on any failure.
     """
     model = get_gemini_model()
@@ -1513,42 +1730,28 @@ def refine_with_llm(query: str, candidates: list) -> list:
     for c in candidates:
         segments_text += f"[Segment {c['index']}] {c['start']:.1f}s - {c['end']:.1f}s: \"{c['text']}\"\n"
     
-    prompt = f"""You are a video content analyst. Given a user's query and transcript segments with timestamps, identify which segments best discuss the queried topic.
-
-For each relevant segment, return:
-- The segment index (matching the input)
-- The exact start and end timestamps from the segment
-- A 2-3 sentence summary of what is discussed about the topic in that segment
+    prompt = f"""You are a video content analyst. Given a user's query and transcript segments with timestamps, provide a concise summary for each segment explaining its relevance to the query.
 
 User Query: "{query}"
 
 Transcript Segments:
 {segments_text}
 
-Respond ONLY with valid JSON in this exact format, no markdown code fences:
-{{{{
+Respond ONLY with valid JSON (no markdown fences):
+{{
   "results": [
-    {{{{
+    {{
       "segment_index": 0,
       "start": 12.5,
       "end": 45.3,
       "summary": "The speaker discusses..."
-    }}}}
+    }}
   ]
-}}}}"""
+}}"""
     
     try:
         response = model.generate_content(prompt)
-        text = response.text.strip()
-        # Strip markdown code fences if present
-        if text.startswith("```"):
-            text = text.split("\n", 1)[1] if "\n" in text else text[3:]
-        if text.endswith("```"):
-            text = text[:-3].strip()
-        if text.startswith("json"):
-            text = text[4:].strip()
-        
-        parsed = json.loads(text)
+        parsed = _parse_gemini_json(response.text)
         return parsed.get("results", [])
     except Exception as e:
         print(f"LLM refinement failed: {e}")

@@ -119,12 +119,12 @@ export default function Summarization() {
         formData.append('file', file);
         formData.append('query', validated.query);
         if (user?.id) formData.append('user_id', user.id);
-        formData.append('top_k', '1');
+        formData.append('top_k', '10');
         formData.append('use_windows', 'true');
         formData.append('window_size', '6');
         formData.append('window_stride', '2');
         formData.append('expand_neighbors', 'true');
-        formData.append('min_clip_secs', '20');
+        formData.append('min_clip_secs', '10');
         formData.append('max_clip_secs', '300');
         formData.append('rerank', 'true');
 
@@ -194,11 +194,12 @@ export default function Summarization() {
           body: JSON.stringify({
             json_path: uploadData.json_path,
             query,
+            top_k: 10,
             use_windows: true,
             window_size: 6,
             window_stride: 2,
             expand_neighbors: true,
-            min_clip_secs: 20,
+            min_clip_secs: 10,
             max_clip_secs: 120,
             rerank: true
           }),
@@ -344,22 +345,29 @@ export default function Summarization() {
 
           <Card className="gradient-card border-border/50">
             <CardHeader>
-              <CardTitle>Top Segments</CardTitle>
-              <CardDescription>Showing relevant segments for your query</CardDescription>
+              <CardTitle>Relevant Segments ({result?.clips?.length || 0})</CardTitle>
+              <CardDescription>All segments matching your query, ranked by relevance</CardDescription>
             </CardHeader>
             <CardContent className="space-y-6">
               <div className={`grid gap-4 ${result?.clips?.length === 1 ? 'grid-cols-1' : 'grid-cols-1 md:grid-cols-2'}`}>
                 {result?.clips?.map((c) => (
                   <div key={c.rank} className="space-y-2 border border-border p-3 rounded-lg bg-card/50">
+                    <div className="flex items-center gap-2 mb-1">
+                      <span className="text-xs font-bold bg-violet-500/20 text-violet-300 px-2 py-0.5 rounded">#{c.rank}</span>
+                      <span className="text-xs text-muted-foreground">{c.start.toFixed(1)}s — {c.end.toFixed(1)}s</span>
+                      <span className={`ml-auto text-xs px-2 py-0.5 rounded ${
+                        c.score >= 0.9 ? 'bg-green-500/15 text-green-400' :
+                        c.score >= 0.6 ? 'bg-yellow-500/15 text-yellow-400' :
+                        'bg-orange-500/15 text-orange-400'
+                      }`}>
+                        {c.score >= 0.9 ? 'High' : c.score >= 0.6 ? 'Medium' : 'Low'} relevance
+                      </span>
+                    </div>
                     <VideoPlayer videoUrl={c.clip_url} autoPlay={false} />
                     <div className="flex flex-col gap-2">
-                      <div className="flex justify-between items-center text-sm text-muted-foreground">
-                        <span>{c.start.toFixed(2)}s - {c.end.toFixed(2)}s</span>
-                        <span className="text-xs bg-primary/10 px-2 py-0.5 rounded text-primary">Score: {c.score.toFixed(3)}</span>
-                      </div>
                       {c.llm_summary && (
                         <div className="mt-1 p-3 rounded-md bg-white/5 border border-white/10">
-                          <p className="text-xs font-semibold text-violet-400 mb-1">AI Summary</p>
+                          <p className="text-xs font-semibold text-violet-400 mb-1">AI Analysis</p>
                           <p className="text-sm leading-relaxed text-foreground/80">{c.llm_summary}</p>
                         </div>
                       )}

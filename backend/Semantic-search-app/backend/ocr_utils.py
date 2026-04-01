@@ -31,9 +31,9 @@ if DEVICE == "cuda:0":
         DEVICE = "cpu"
 
 print(f"--- [NeuroClip OCR] ACTIVE DEVICE: {DEVICE.upper()} ---")
-CONFIDENCE_THRESHOLD = 0.40
+CONFIDENCE_THRESHOLD = 0.30
 DUPLICATE_THRESHOLD = 0.85
-MIN_SLIDE_INTERVAL = 5.0
+MIN_SLIDE_INTERVAL = 3.0
 
 TARGET_QUERIES = [
     "slide presentation",
@@ -105,13 +105,20 @@ def load_ocr_model(path):
     try:
         if os.path.exists(path):
             state_dict = torch.load(path, map_location=DEVICE)
-            model.load_state_dict(state_dict)
+            # Load with strict=False to ignore unexpected keys (e.g. vocab layers)
+            missing, unexpected = model.load_state_dict(state_dict, strict=False)
+            if missing:
+                print(f"[OCR] Missing keys (may affect accuracy): {missing[:5]}...")
+            if unexpected:
+                print(f"[OCR] Unexpected keys (safe to ignore): {unexpected[:5]}...")
             print(f"OCR Model weights loaded from {path}.")
         else:
-            print(f"Warning: OCR Model file not found at {path}. Extraction will be skipped.")
+            print(f"[OCR WARNING] Model file not found at {path}. OCR extraction will be SKIPPED.")
             return None
     except Exception as e:
-        print(f"Error loading OCR weights: {e}")
+        import traceback
+        print(f"[OCR ERROR] Failed to load model weights: {e}")
+        traceback.print_exc()
         return None
     model.to(DEVICE)
     model.eval()
@@ -215,7 +222,10 @@ def run_ocr_on_frames(image_folder):
         import easyocr
         reader = easyocr.Reader(['en'], gpu=(DEVICE.startswith("cuda")))
     except ImportError:
-        print("EasyOCR not installed. Skipping OCR.")
+        print("[OCR WARNING] EasyOCR not installed. Install with: pip install easyocr. Skipping text extraction.")
+        return []
+    except Exception as e:
+        print(f"[OCR ERROR] EasyOCR initialization failed: {e}")
         return []
 
     files = sorted([f for f in os.listdir(image_folder) if f.endswith('.jpg')])

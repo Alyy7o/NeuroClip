@@ -119,6 +119,28 @@ export default function Compression() {
       const reduction = data.reduction;
       const durationSeconds = data.duration_seconds;
       const processedVideoUrl = `${API_BASE}${data.url}`;
+      const usedOriginal = data.used_original || false;
+
+      let explanation = '';
+      if (usedOriginal) {
+        explanation = `Your video is already highly optimized and cannot be compressed further without significant quality loss.
+
+The original file has been preserved at its current quality.
+${data.duration_seconds ? `\nAnalysis took: ${data.duration_seconds} seconds` : ''}
+
+- File size: ${formatFileSize(originalSize)}
+- Encoder: ${data.encoder}
+- Result: Original preserved (already optimal)`;
+      } else {
+        explanation = `Your video has been successfully compressed using advanced adaptive encoding (${data.encoder}).
+${data.duration_seconds ? `\nCompression took: ${data.duration_seconds} seconds` : ''}
+
+Compression Statistics:
+
+- Original size: ${formatFileSize(originalSize)}
+- Compressed size: ${formatFileSize(compressedSize)}
+- Size reduction: ${reduction.toFixed(2)}%`;
+      }
 
       setResult({
         processedVideoUrl: processedVideoUrl,
@@ -126,15 +148,8 @@ export default function Compression() {
         compressedSize,
         reduction: reduction,
         durationSeconds: durationSeconds,
-        explanation: `Your video has been successfully compressed using advanced encoding technology.
-${data.duration_seconds ? `\nCompression took: "${data.duration_seconds} seconds"` : ''}
-
-Compression Statistics:
-
-- Original size: ${formatFileSize(originalSize)}
-- Compressed size: ${formatFileSize(compressedSize)}
-- Size reduction: ${reduction.toFixed(2)}%
-`,
+        usedOriginal,
+        explanation,
         duration: timeRange.end - timeRange.start,
         originalDuration: timeRange.end,
       });
@@ -186,9 +201,13 @@ Compression Statistics:
                   <Minimize2 className="h-6 w-6" />
                 </div>
                 <div>
-                  <h1 className="text-2xl md:text-3xl font-bold">Compressed Video</h1>
+                  <h1 className="text-2xl md:text-3xl font-bold">
+                    {result?.usedOriginal ? 'Video Already Optimized' : 'Compressed Video'}
+                  </h1>
                   <p className="text-sm md:text-base text-muted-foreground">
-                    {result?.reduction?.toFixed(2)}% size reduction
+                    {result?.usedOriginal
+                      ? 'Original preserved — already at optimal compression'
+                      : `${result?.reduction?.toFixed(2)}% size reduction`}
                   </p>
                 </div>
               </div>
@@ -216,10 +235,12 @@ Compression Statistics:
                       <p className="text-xl sm:text-2xl font-bold text-primary">{formatFileSize(result.compressedSize)}</p>
                     </CardContent>
                   </Card>
-                  <Card className="bg-accent/10 border-accent/20">
+                  <Card className={result?.usedOriginal ? 'bg-yellow-500/10 border-yellow-500/20' : result?.reduction > 0 ? 'bg-accent/10 border-accent/20' : 'bg-red-500/10 border-red-500/20'}>
                     <CardContent className="pt-6 text-center">
                       <p className="text-xs sm:text-sm text-muted-foreground mb-1">Size Reduction</p>
-                      <p className="text-xl sm:text-2xl font-bold text-accent">{result.reduction?.toFixed(2)}%</p>
+                      <p className={`text-xl sm:text-2xl font-bold ${result?.usedOriginal ? 'text-yellow-400' : result?.reduction > 0 ? 'text-accent' : 'text-red-400'}`}>
+                        {result?.usedOriginal ? 'N/A' : `${result.reduction?.toFixed(2)}%`}
+                      </p>
                     </CardContent>
                   </Card>
                 </div>

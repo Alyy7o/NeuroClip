@@ -2293,78 +2293,263 @@ async def compress_video(
         print("--- [CPU] Using libx265 (CPU encoding). ---")
 
     # -------------------------------------------------------------------------
-    # 5. Build FFmpeg Command
+    # 4b. Probe Input Video (bitrate, resolution, codec, audio bitrate)
     #
-    #    CRITICAL FIX: All quality/encoding flags MUST appear before the output
-    #    path. Previously flags were appended via cmd.extend() AFTER the output
-    #    path string, causing FFmpeg to silently ignore them — resulting in
-    #    default (very high quality / large file) encoding on large videos.
-    #
-    #    Scale filter: "scale=-2:min(720,ih)" caps height at 720p while
-    #    preserving aspect ratio. If the video is already smaller than 720p it
-    #    is left untouched (ih = input height).
+    #     Adaptive compression: We MUST know the input characteristics
+    #     before choosing encoding settings. Without this, already-compressed
+    #     or low-bitrate videos get RE-ENCODED at higher quality than the
+    #     original, causing file size inflation.
     # -------------------------------------------------------------------------
-    vf = "scale=-2:min(720\\,ih)"   # cap at 720p; keep smaller videos as-is
+    input_bitrate_kbps  = 0
+    input_height        = 0
+    input_width         = 0
+    input_codec         = ""
+    input_audio_bitrate = 0
+    input_audio_codec   = ""
 
-    # --- common input flags ---
-    cmd = [
-        ff, "-y",
-        "-i", str(input_path),
-        "-vf", vf,
-    ]
-
-    if has_gpu:
-        # GPU path: HEVC NVENC — VBR with tighter bitrate ceiling
-        cmd += [
-            "-c:v",     "hevc_nvenc",
-            "-preset",  "p4",        # better compression than p3
-            "-rc",      "vbr",
-            "-cq",      "28",
-            "-b:v",     "1.5M",      # target bitrate  (was 2M)
-            "-maxrate", "2.5M",      # hard cap        (was 3M)
-            "-bufsize", "5M",
-            "-qmin",    "24",
-            "-qmax",    "36",        # allow more compression on easy scenes
-        ]
-        mode_label = "HEVC_NVENC"
-    else:
-        # CPU path: libx265 — CRF only (no conflicting -b:v)
-        # Mixing -crf with -b:v in libx265 causes undefined/bloated output.
-        cmd += [
-            "-c:v",        "libx265",
-            "-preset",     "medium",          # better ratio than 'fast'
-            "-crf",        "28",              # sole quality knob — no -b:v
-            "-x265-params","pools=4:frame-threads=2",  # explicit Kaggle-safe threading
-        ]
-        mode_label = "LIBX265"
-
-    # --- shared audio + container flags, then output path (always last) ---
-    cmd += [
-        "-c:a",      "aac",
-        "-b:a",      "96k",          # reduced from 128k
-        "-movflags", "+faststart",
-        str(output_path),            # OUTPUT PATH IS LAST — never append flags after this
-    ]
-
-    # -------------------------------------------------------------------------
-    # 6. Run Compression
-    # -------------------------------------------------------------------------
-    start_time = time.time()
     try:
-        subprocess.run(
-            cmd,
-            check=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE
-        )
-    except subprocess.CalledProcessError as e:
-        err_out = e.stderr.decode("utf-8", errors="replace") if e.stderr else str(e)
-        raise HTTPException(status_code=500, detail=f"Compression failed: {err_out}")
+        fp = shutil.which("ffprobe")
+        if not fp:
+            try:
+                import imageio_ffmpeg
+                fp_path = Path(imageio_ffmpeg.get_ffmpeg_exe())
+                fp = str(fp_path.parent / ("ffprobe.exe" if os.name == 'nt' else "ffprobe"))
+                if not Path(fp).exists():
+                    fp = None
+            except Exception:
+                fp = None
+
+        if fp:
+            # Get video stream info: bitrate, height, width, codec
+            probe_v = subprocess.run(
+                [fp, "-v", "error",
+                 "-select_streams", "v:0",
+                 "-show_entries", "stream=bit_rate,height,width,codec_name",
+                 "-of", "json",
+                 str(input_path)],
+                capture_output=True, text=True
+            )
+            if probe_v.returncode == 0:
+                import json as _json
+                pv = _json.loads(probe_v.stdout)
+                streams = pv.get("streams", [])
+                if streams:
+                    s = streams[0]
+                    input_codec  = (s.get("codec_name") or "").lower()
+                    input_height = int(s.get("height") or 0)
+                    input_width  = int(s.get("width") or 0)
+                    vbr = s.get("bit_rate")
+                    if vbr and str(vbr).isdigit():
+                        input_bitrate_kbps = int(vbr) // 1000
+
+            # If per-stream bitrate not available, compute from file size & duration
+            if input_bitrate_kbps == 0 and probe_duration > 0:
+                input_bitrate_kbps = int((original_size * 8) / probe_duration / 1000)
+
+            # Get audio stream info
+            probe_a = subprocess.run(
+                [fp, "-v", "error",
+                 "-select_streams", "a:0",
+                 "-show_entries", "stream=bit_rate,codec_name",
+                 "-of", "json",
+                 str(input_path)],
+                capture_output=True, text=True
+            )
+            if probe_a.returncode == 0:
+                pa = _json.loads(probe_a.stdout)
+                astreams = pa.get("streams", [])
+                if astreams:
+                    input_audio_codec = (astreams[0].get("codec_name") or "").lower()
+                    abr = astreams[0].get("bit_rate")
+                    if abr and str(abr).isdigit():
+                        input_audio_bitrate = int(abr) // 1000
+
+        print(f"--- [PROBE] codec={input_codec}, {input_width}x{input_height}, "
+              f"v_bitrate={input_bitrate_kbps}kbps, "
+              f"a_codec={input_audio_codec}, a_bitrate={input_audio_bitrate}kbps ---")
+    except Exception as e:
+        print(f"--- [PROBE] Input analysis failed (will use defaults): {e} ---")
+
+    # -------------------------------------------------------------------------
+    # 5. Build Adaptive FFmpeg Command
+    #
+    #    KEY INSIGHT: The old code used fixed CRF 28 / fixed bitrate caps
+    #    regardless of input. This works great for high-bitrate source
+    #    material (camera raws, screen-capture, etc.) but INFLATES files
+    #    that are already efficiently encoded at low bitrate.
+    #
+    #    New approach:
+    #    a) Compute a TARGET bitrate that is at most 70% of input bitrate
+    #    b) Use CRF as quality floor, but add -maxrate cap to prevent bloat
+    #    c) Skip scaling if already <= 720p
+    #    d) Copy audio if already AAC and <= 128kbps (avoid inflation)
+    #    e) If first pass STILL inflates → retry more aggressively
+    #    f) If retry STILL inflates → serve original file
+    # -------------------------------------------------------------------------
+
+    # --- Determine if downscaling is needed ---
+    needs_scale = input_height > 720 or (input_height == 0)  # unknown → apply scale safely
+    vf = "scale=-2:min(720\\,ih)" if needs_scale else None
+
+    # --- Determine target video bitrate (adaptive) ---
+    # Goal: produce output at most 70% of input bitrate
+    # Floor: never go below 300 kbps (unwatchable below that)
+    # Ceiling: never exceed 2500 kbps (diminishing returns above that for 720p)
+    if input_bitrate_kbps > 0:
+        target_bitrate_kbps = max(300, min(int(input_bitrate_kbps * 0.65), 2500))
+        maxrate_kbps        = max(400, min(int(input_bitrate_kbps * 0.80), 3000))
+    else:
+        # Unknown input → conservative defaults
+        target_bitrate_kbps = 1500
+        maxrate_kbps        = 2500
+
+    # --- Determine audio handling ---
+    # If input audio is already AAC at ≤ 128kbps, just copy it (saves space + time)
+    copy_audio = (input_audio_codec == "aac" and 0 < input_audio_bitrate <= 128)
+    audio_bitrate = "64k" if input_audio_bitrate > 0 and input_audio_bitrate < 96 else "96k"
+
+    # --- Determine CRF based on input quality ---
+    # Higher CRF = smaller file but lower quality
+    # For already-compressed content, use CRF 30-32 (since it's already lossy)
+    # For high-bitrate content, use CRF 26-28 (more room to compress)
+    already_efficient = (
+        input_codec in ("hevc", "h265", "av1")
+        or (input_codec in ("h264", "avc") and input_bitrate_kbps > 0 and input_bitrate_kbps < 1500)
+    )
+    if already_efficient:
+        crf_value = "30"
+        print(f"--- [ADAPT] Input already efficient ({input_codec} @ {input_bitrate_kbps}kbps) → CRF {crf_value} ---")
+    elif input_bitrate_kbps > 5000:
+        crf_value = "26"
+        print(f"--- [ADAPT] High-bitrate input ({input_bitrate_kbps}kbps) → CRF {crf_value} ---")
+    else:
+        crf_value = "28"
+        print(f"--- [ADAPT] Standard input → CRF {crf_value} ---")
+
+    def _build_compress_cmd(out_path, crf, tgt_br, max_br, aggressive=False):
+        """Build the FFmpeg command with the given parameters."""
+        c = [ff, "-y", "-i", str(input_path)]
+
+        # Video filter (scale) — only if needed
+        if vf:
+            c += ["-vf", vf]
+
+        if has_gpu:
+            c += [
+                "-c:v",     "hevc_nvenc",
+                "-preset",  "p5" if aggressive else "p4",
+                "-rc",      "vbr",
+                "-cq",      str(int(crf) + (2 if aggressive else 0)),
+                "-b:v",     f"{tgt_br}k",
+                "-maxrate", f"{max_br}k",
+                "-bufsize", f"{max_br * 2}k",
+                "-qmin",    str(int(crf) - 2),
+                "-qmax",    str(int(crf) + 8),
+            ]
+        else:
+            # CPU: CRF + maxrate (maxrate prevents bloating above target)
+            x265_params = f"pools=4:frame-threads=2:vbv-maxrate={max_br}:vbv-bufsize={max_br * 2}"
+            c += [
+                "-c:v",         "libx265",
+                "-preset",      "slower" if aggressive else "medium",
+                "-crf",         crf,
+                "-x265-params", x265_params,
+            ]
+
+        # Audio
+        if copy_audio and not aggressive:
+            c += ["-c:a", "copy"]
+        else:
+            c += ["-c:a", "aac", "-b:a", "64k" if aggressive else audio_bitrate]
+
+        c += ["-movflags", "+faststart", str(out_path)]
+        return c
+
+    # -------------------------------------------------------------------------
+    # 6. Run Compression (with adaptive retry)
+    # -------------------------------------------------------------------------
+    mode_label = "HEVC_NVENC" if has_gpu else "LIBX265"
+    start_time = time.time()
+    attempt = 0
+    used_original = False
+
+    for attempt in range(2):  # attempt 0 = normal, attempt 1 = aggressive
+        aggressive = (attempt == 1)
+        if aggressive:
+            print("--- [RETRY] First pass inflated file → retrying with aggressive settings ---")
+            # More aggressive: higher CRF, lower bitrate
+            retry_crf = str(int(crf_value) + 4)  # e.g. 28 → 32
+            retry_tgt = max(200, target_bitrate_kbps // 2)
+            retry_max = max(300, maxrate_kbps // 2)
+            cmd = _build_compress_cmd(output_path, retry_crf, retry_tgt, retry_max, aggressive=True)
+        else:
+            cmd = _build_compress_cmd(output_path, crf_value, target_bitrate_kbps, maxrate_kbps, aggressive=False)
+
+        print(f"--- [COMPRESS] Attempt {attempt+1}: {' '.join(cmd)} ---")
+
+        try:
+            subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        except subprocess.CalledProcessError as e:
+            err_out = e.stderr.decode("utf-8", errors="replace") if e.stderr else str(e)
+            if attempt == 0:
+                # First attempt failed — try falling back to simpler settings
+                print(f"--- [COMPRESS] Attempt 1 failed: {err_out[:200]} — trying fallback ---")
+                # Simple fallback: use libx264 (universally supported) with high CRF
+                fallback_cmd = [
+                    ff, "-y", "-i", str(input_path),
+                    "-c:v", "libx264", "-preset", "medium", "-crf", "30",
+                    "-c:a", "aac", "-b:a", "96k",
+                    "-movflags", "+faststart",
+                    str(output_path),
+                ]
+                try:
+                    subprocess.run(fallback_cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                    mode_label = "LIBX264_FALLBACK"
+                except subprocess.CalledProcessError as e2:
+                    err2 = e2.stderr.decode("utf-8", errors="replace") if e2.stderr else str(e2)
+                    raise HTTPException(status_code=500, detail=f"Compression failed: {err2}")
+                break
+            else:
+                raise HTTPException(status_code=500, detail=f"Compression failed: {err_out}")
+
+        # Check if output exists and is not empty
+        if not output_path.exists() or output_path.stat().st_size == 0:
+            if attempt == 0:
+                continue  # retry
+            raise HTTPException(status_code=500, detail="Compression resulted in empty file")
+
+        compressed_size = output_path.stat().st_size
+
+        # Check if compression actually reduced the file
+        if compressed_size < original_size:
+            print(f"--- [COMPRESS] Attempt {attempt+1} successful: "
+                  f"{original_size} → {compressed_size} bytes "
+                  f"({100 - compressed_size/original_size*100:.1f}% reduction) ---")
+            break
+        else:
+            print(f"--- [COMPRESS] Attempt {attempt+1}: output ({compressed_size}) >= input ({original_size}) ---")
+            if attempt == 0:
+                # Delete inflated output, will retry
+                try:
+                    output_path.unlink()
+                except Exception:
+                    pass
+                continue
+            else:
+                # Even aggressive pass couldn't help — serve the original
+                print("--- [COMPRESS] Both passes inflated file → serving original ---")
+                try:
+                    shutil.copy2(str(input_path), str(output_path))
+                except Exception:
+                    pass
+                used_original = True
+                compressed_size = original_size
+                break
 
     duration = time.time() - start_time
 
     # -------------------------------------------------------------------------
-    # 7. Validate Output
+    # 7. Validate Output & Calculate Stats
     # -------------------------------------------------------------------------
     if not output_path.exists() or output_path.stat().st_size == 0:
         raise HTTPException(status_code=500, detail="Compression resulted in empty file")
@@ -2374,6 +2559,13 @@ async def compress_video(
         100 - (compressed_size / original_size * 100)
         if original_size > 0 else 0
     )
+
+    if used_original:
+        mode_label += "_PASSTHROUGH"
+        print(f"--- [RESULT] Served original file (compression would inflate). Reduction: 0% ---")
+    else:
+        print(f"--- [RESULT] Final: {original_size} → {compressed_size} bytes, "
+              f"reduction: {reduction:.1f}% ---")
 
     # -------------------------------------------------------------------------
     # 8. Save to Processing History & Video Metadata
@@ -2417,7 +2609,10 @@ async def compress_video(
                         "encoder": mode_label,
                         "original_size": original_size,
                         "reduction": reduction,
-                        "proc_time": duration
+                        "proc_time": duration,
+                        "used_original": used_original,
+                        "input_codec": input_codec,
+                        "input_bitrate_kbps": input_bitrate_kbps,
                     }
                 }).execute()
             
@@ -2437,6 +2632,7 @@ async def compress_video(
         "duration_seconds": round(duration, 2),
         "encoder":          mode_label,
         "url":              f"/static/{rel_path.as_posix()}",
+        "used_original":    used_original,
     }
 
 

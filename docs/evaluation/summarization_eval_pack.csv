@@ -1,0 +1,51 @@
+case_id,domain,video_theme,video_selection_hint,query,expected_relevant_content,difficulty,priority
+SUM001,Math,Derivatives Basics,Select an introductory lecture on derivatives (8-20 min),What is the derivative in simple terms?,Definition and intuitive meaning of derivative,Easy,High
+SUM002,Math,Derivatives Basics,Select an introductory lecture on derivatives (8-20 min),How is derivative linked to slope of tangent?,Explanation of tangent slope interpretation,Easy,High
+SUM003,Math,Derivatives Basics,Select an introductory lecture on derivatives (8-20 min),Give a worked example of derivative of x squared,Step-by-step derivative example for x^2,Easy,Medium
+SUM004,Math,Integration Basics,Select a beginner lesson on integration (10-25 min),What is the difference between derivative and integration?,Conceptual comparison between differentiation and integration,Easy,High
+SUM005,Math,Integration Basics,Select a beginner lesson on integration (10-25 min),Where do we use integration in real life?,Applied examples like area, motion, accumulation,Medium,Medium
+SUM006,Physics,Newton Laws,Choose a high school physics lesson on forces and motion,Explain Newton first law with an example,Inertia explanation with daily-life example,Easy,High
+SUM007,Physics,Newton Laws,Choose a high school physics lesson on forces and motion,What is Newton second law formula and meaning?,F=ma explanation and interpretation,Easy,High
+SUM008,Physics,Newton Laws,Choose a high school physics lesson on forces and motion,How does Newton third law work in rockets?,Action-reaction pair and rocket propulsion,Medium,Medium
+SUM009,Computer Science,Python Basics,Pick a Python beginner tutorial (15-45 min),How do for loops work in Python?,Syntax and examples of for loops,Easy,High
+SUM010,Computer Science,Python Basics,Pick a Python beginner tutorial (15-45 min),Difference between list and tuple in Python?,Comparison of mutability and usage,Easy,High
+SUM011,Computer Science,Python Basics,Pick a Python beginner tutorial (15-45 min),Show a Python function example with parameters,Function definition and call example,Easy,Medium
+SUM012,Computer Science,Data Structures,Pick an intro data structures lecture,What is a stack and where is it used?,LIFO explanation and examples like undo/call stack,Easy,High
+SUM013,Computer Science,Data Structures,Pick an intro data structures lecture,Explain queue with real world example,Queue operations and use cases,Easy,Medium
+SUM014,Computer Science,Data Structures,Pick an intro data structures lecture,Difference between stack and queue?,Direct comparison with examples,Easy,High
+SUM015,Computer Science,DBMS Normalization,Pick a normalization tutorial with examples,What is first normal form and why needed?,1NF definition and data redundancy motivation,Medium,High
+SUM016,Computer Science,DBMS Normalization,Pick a normalization tutorial with examples,Explain second normal form with sample table,2NF explanation and dependency example,Medium,Medium
+SUM017,Computer Science,DBMS Normalization,Pick a normalization tutorial with examples,When do we use third normal form?,3NF conditions and anomaly reduction,Medium,Medium
+SUM018,AI,Machine Learning Intro,Pick a beginner ML lecture (classification vs regression),What is supervised learning?,Definition with labeled data examples,Easy,High
+SUM019,AI,Machine Learning Intro,Pick a beginner ML lecture (classification vs regression),Difference between classification and regression?,Task-level distinction and output types,Easy,High
+SUM020,AI,Machine Learning Intro,Pick a beginner ML lecture (classification vs regression),What is overfitting and how to avoid it?,Overfitting causes and mitigation methods,Medium,High
+SUM021,AI,Neural Networks Basics,Pick an intro neural network lesson,What is a neuron in neural networks?,Basic neuron model and weighted sum concept,Easy,Medium
+SUM022,AI,Neural Networks Basics,Pick an intro neural network lesson,Why do we need activation functions?,Non-linearity rationale and examples,Medium,High
+SUM023,AI,Neural Networks Basics,Pick an intro neural network lesson,Explain backpropagation at high level,Training signal flow and gradient idea,Hard,Medium
+SUM024,Cybersecurity,Password Security,Pick an intro cybersecurity lecture,How to create a strong password policy?,Password length, complexity, manager, MFA points,Easy,High
+SUM025,Cybersecurity,Password Security,Pick an intro cybersecurity lecture,What is phishing and how to detect it?,Phishing indicators and prevention tips,Easy,High
+SUM026,Cybersecurity,Password Security,Pick an intro cybersecurity lecture,Explain two factor authentication benefits,2FA concept and reduced account compromise risk,Easy,Medium
+SUM027,Economics,Supply and Demand,Pick an introductory microeconomics class,What shifts demand curve?,Determinants of demand shifts,Medium,Medium
+SUM028,Economics,Supply and Demand,Pick an introductory microeconomics class,What is market equilibrium?,Intersection of supply and demand,Easy,Medium
+SUM029,Economics,Supply and Demand,Pick an introductory microeconomics class,How do price ceilings affect market?,Shortage explanation with policy example,Medium,Low
+SUM030,Biology,Cell Structure,Pick a school-level biology lecture on cells,What are the main parts of a cell?,Nucleus, membrane, cytoplasm, organelles overview,Easy,Medium
+SUM031,Biology,Cell Structure,Pick a school-level biology lecture on cells,Difference between plant and animal cell?,Cell wall/chloroplast/vacuole distinctions,Easy,Medium
+SUM032,Biology,Photosynthesis,Pick a photosynthesis lesson with process diagram,Explain photosynthesis process in steps,Light reaction and Calvin cycle summary,Medium,Medium
+SUM033,Chemistry,Chemical Bonding,Pick an intro chemistry lesson on bonding,What is ionic bond with example?,Electron transfer and NaCl-style example,Easy,Medium
+SUM034,Chemistry,Chemical Bonding,Pick an intro chemistry lesson on bonding,How is covalent bond different from ionic?,Electron sharing vs transfer comparison,Easy,Medium
+SUM035,Engineering,Digital Logic,Pick a digital logic fundamentals lecture,What is truth table and how to read it?,Input-output mapping table explanation,Easy,Medium
+SUM036,Engineering,Digital Logic,Pick a digital logic fundamentals lecture,Explain AND OR NOT gates with examples,Basic gate behavior and sample outputs,Easy,High
+SUM037,Statistics,Probability Basics,Pick an intro probability class,What is conditional probability?,Definition and simple event example,Medium,Medium
+SUM038,Statistics,Probability Basics,Pick an intro probability class,What is Bayes theorem used for?,Posterior update intuition and use cases,Hard,Low
+SUM039,Software Engineering,Git and Version Control,Pick a practical git tutorial,How to resolve merge conflict in git?,Conflict workflow and command-level steps,Medium,High
+SUM040,Software Engineering,Git and Version Control,Pick a practical git tutorial,Difference between merge and rebase?,Conceptual and workflow difference,Medium,Medium
+SUM041,Software Engineering,System Design Basics,Pick a beginner system design lecture,What is load balancer and why needed?,Traffic distribution and availability benefits,Medium,Medium
+SUM042,Software Engineering,System Design Basics,Pick a beginner system design lecture,What is caching and where to place it?,Latency reduction and cache layer options,Medium,Medium
+SUM043,Mathematics,Linear Algebra,Pick a linear algebra intro lecture,Vectors vs scalars explained simply,Core definitions with examples,Easy,Medium
+SUM044,Mathematics,Linear Algebra,Pick a linear algebra intro lecture,What is matrix multiplication intuition?,Transformation/composition explanation,Hard,Low
+SUM045,AI,LLM Fundamentals,Pick a beginner lecture on transformers/LLMs,What is attention mechanism in transformers?,Token interaction weighting intuition,Hard,Medium
+SUM046,AI,LLM Fundamentals,Pick a beginner lecture on transformers/LLMs,What is prompt engineering?,Prompt design principles and examples,Easy,Medium
+SUM047,AI,LLM Fundamentals,Pick a beginner lecture on transformers/LLMs,Why do LLMs hallucinate?,Model uncertainty and generation behavior,Hard,Low
+SUM048,Computer Science,Operating Systems,Pick an intro OS lecture,What is process vs thread?,Execution unit comparison and overhead,Medium,High
+SUM049,Computer Science,Operating Systems,Pick an intro OS lecture,Explain deadlock conditions,Mutual exclusion and Coffman conditions,Hard,Medium
+SUM050,Computer Science,Operating Systems,Pick an intro OS lecture,What is virtual memory?,Address translation and paging overview,Medium,Medium

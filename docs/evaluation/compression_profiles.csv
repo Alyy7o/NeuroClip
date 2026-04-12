@@ -1,0 +1,9 @@
+profile_id,target_duration_sec,target_resolution,target_video_bitrate,target_audio_bitrate,target_size_band,usage
+CMP_TINY_01,30,640x360,500k,64k,5-15MB,Quick smoke test and mobile scenario
+CMP_SMALL_02,60,854x480,800k,96k,15-40MB,Low-bandwidth educational snippet
+CMP_MEDIUM_03,180,1280x720,1500k,96k,40-140MB,Standard lecture segment
+CMP_LARGE_04,600,1280x720,2500k,128k,150-450MB,Long topic explanation
+CMP_XL_05,1200,1920x1080,3500k,128k,400MB-1.2GB,Stress test for long full lecture
+CMP_MOTION_06,120,1280x720,2200k,96k,80-200MB,Slides and handwriting with camera movement
+CMP_TEXT_07,120,1280x720,1800k,96k,70-180MB,Text-heavy screen recordings
+CMP_TALKINGHEAD_08,300,1280x720,1300k,96k,100-260MB,Mostly static instructor videos

@@ -1,0 +1,11 @@
+source_id,platform,channel_or_provider,domain,selection_criteria,license_note
+SRC001,YouTube,Khan Academy,Math and Science,Pick videos with clear narration and slides,Use links for evaluation and follow platform terms
+SRC002,YouTube,MIT OpenCourseWare,Engineering and CS,Pick lecture videos 10-60 min,Use links for evaluation and follow platform terms
+SRC003,YouTube,freeCodeCamp.org,Programming,Pick beginner and intermediate tutorials,Use links for evaluation and follow platform terms
+SRC004,YouTube,CrashCourse,General Education,Pick topic-explainer episodes 10-20 min,Use links for evaluation and follow platform terms
+SRC005,YouTube,NPTELHRD,Engineering and CS,Pick full lecture and topic clips,Use links for evaluation and follow platform terms
+SRC006,YouTube,3Blue1Brown,Mathematics,Pick concept-focused visual lectures,Use links for evaluation and follow platform terms
+SRC007,YouTube,TED-Ed,General Education,Pick animated explainers with clear key points,Use links for evaluation and follow platform terms
+SRC008,Archive.org,Open Educational Media,Mixed,Prefer public-domain/open-license uploads,Prefer open-license content for redistribution
+SRC009,OER Commons,OER providers,Mixed,Pick openly licensed educational media,Prefer open-license content for redistribution
+SRC010,Wikimedia Commons,Educational video collections,Mixed,Use CC-licensed educational videos,Prefer open-license content for redistribution

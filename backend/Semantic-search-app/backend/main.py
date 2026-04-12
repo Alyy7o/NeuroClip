@@ -1358,7 +1358,7 @@ def clips_search(payload: ClipSearchRequest):
             "llm_summary": None,
         })
 
-    # LLM refinement: enrich embedding-based results with summaries
+    # LLM refinement: enrich embedding-based results with summaries AND filter irrelevant
     try:
         llm_candidates = [
             {"index": i, "text": r["text"], "start": r["start"], "end": r["end"]}
@@ -1366,9 +1366,23 @@ def clips_search(payload: ClipSearchRequest):
         ]
         llm_results = refine_with_llm(payload.query, llm_candidates)
         llm_map = {item["segment_index"]: item for item in llm_results}
+        
+        filtered_results = []
         for i, r in enumerate(results):
             if i in llm_map:
-                r["llm_summary"] = llm_map[i].get("summary")
+                llm_item = llm_map[i]
+                r["llm_summary"] = llm_item.get("summary")
+                # Filter out segments the LLM says are NOT relevant
+                if llm_item.get("relevant", True) is False:
+                    print(f"[LLM Filter] Removing clip #{r['rank']} — marked as irrelevant")
+                    continue
+            filtered_results.append(r)
+        
+        # Re-rank remaining results
+        for new_rank, r in enumerate(filtered_results, 1):
+            r["rank"] = new_rank
+        results = filtered_results
+        print(f"[LLM Filter] {len(results)} clips survived relevance filter")
     except Exception as e:
         print(f"LLM enrichment failed in clips_search: {e}")
 
@@ -1795,6 +1809,9 @@ def gemini_intelligent_search(query: str, sentences: list, top_k: int = 10) -> l
     Use LLM to reason about the FULL transcript and find ALL segments
     that match the user's query. Works with Groq (primary) or Gemini (fallback).
     
+    Uses strict semantic matching — segments must ACTUALLY discuss the topic,
+    not just contain similar-sounding keywords.
+    
     Returns:
         List of dicts: [{"start": float, "end": float, "summary": str, "relevance": str}]
         Returns empty list if LLM is unavailable (caller should fall back to embeddings).
@@ -1821,31 +1838,41 @@ def gemini_intelligent_search(query: str, sentences: list, top_k: int = 10) -> l
     if len(transcript_text) > 12000:
         transcript_text = transcript_text[:12000] + "\n[... transcript truncated ...]"
     
-    prompt = f"""You are an expert video content analyst. Your task is to carefully analyze a video transcript and find EVERY part of the video that is relevant to the user's query.
+    prompt = f"""You are an expert video content analyst performing STRICT semantic search on a video transcript.
 
-IMPORTANT INSTRUCTIONS:
-1. Read the ENTIRE transcript carefully
-2. Identify ALL segments where the topic is discussed — not just the most obvious one
-3. Consider synonyms, related concepts, and indirect references
-4. If the user asks about a topic that appears in multiple places, return ALL of them
-5. Merge nearby segments (within 10 seconds) into a single result
-6. Return up to {top_k} segments, ranked by relevance (most relevant first)
-7. Each segment should have precise start/end timestamps from the transcript
-8. Include [On Screen] and [Visual Content] text in your analysis if present
+Your task: Find segments where the video ACTUALLY DISCUSSES the user's query topic in a meaningful, substantive way.
+
+CRITICAL RULES FOR ACCURACY:
+1. A segment is RELEVANT only if the speaker is genuinely explaining, discussing, or demonstrating the queried concept.
+2. A segment is NOT RELEVANT if it merely contains a word that looks or sounds similar to the query but discusses something entirely different.
+   - Example: If query is "vector database", a segment mentioning "vectorless" or "vector graphics" is NOT relevant unless it's actually about vector databases.
+   - Example: If query is "RAG (Retrieval Augmented Generation)", only return segments where RAG is actually explained or discussed, not where "rag" appears as a common word.
+3. Consider the FULL CONTEXT of each segment — does the surrounding conversation support that this is about the queried topic?
+4. Prefer segments with EXPLANATIONS, DEFINITIONS, or DEMONSTRATIONS of the concept over mere mentions.
+5. If the video does NOT substantively discuss the queried topic at all, return an EMPTY segments array — do NOT force irrelevant matches.
+6. Merge nearby segments (within 10 seconds) into a single result.
+7. Return up to {top_k} segments, ranked by relevance (most relevant first).
+8. Each segment should have precise start/end timestamps from the transcript.
+9. Include [On Screen] and [Visual Content] text in your analysis if present.
 
 User Query: "{query}"
 
 Full Video Transcript (with timestamps):
 {transcript_text}
 
+Before responding, think step-by-step:
+- What EXACTLY is the user looking for?
+- Which segments genuinely discuss this specific topic (not just contain similar words)?
+- Would a human watching these segments feel their question was answered?
+
 Respond ONLY with valid JSON:
 {{
-  "reasoning": "Brief explanation of what the user is looking for and how you identified relevant segments",
+  "reasoning": "Explain what the user is searching for and your evaluation of which segments truly match vs. which are false positives",
   "segments": [
     {{
       "start": 12.5,
       "end": 45.3,
-      "summary": "2-3 sentence description of what is discussed in this segment",
+      "summary": "2-3 sentence description of what is ACTUALLY discussed in this segment and how it relates to the query",
       "relevance": "high/medium/low"
     }}
   ]
@@ -1887,9 +1914,9 @@ Respond ONLY with valid JSON:
 
 def refine_with_llm(query: str, candidates: list) -> list:
     """
-    Send candidate transcript segments to LLM for refinement/summary.
+    Send candidate transcript segments to LLM for relevance assessment and summary.
     Each candidate: {"index": int, "text": str, "start": float, "end": float}
-    Returns list of {"segment_index": int, "start": float, "end": float, "summary": str}
+    Returns list of {"segment_index": int, "start": float, "end": float, "summary": str, "relevant": bool}
     Falls back to empty list on any failure.
     """
     groq_key = os.getenv("GROQ_API_KEY", "").strip()
@@ -1901,7 +1928,13 @@ def refine_with_llm(query: str, candidates: list) -> list:
     for c in candidates:
         segments_text += f"[Segment {c['index']}] {c['start']:.1f}s - {c['end']:.1f}s: \"{c['text']}\"\n"
     
-    prompt = f"""You are a video content analyst. Given a user's query and transcript segments with timestamps, provide a concise summary for each segment explaining its relevance to the query.
+    prompt = f"""You are a strict video content relevance judge. Given the user's query and transcript segments, you must:
+1. Determine if each segment is TRULY RELEVANT to the query (not just containing similar keywords)
+2. Provide a concise summary for relevant segments
+
+CRITICAL: A segment is RELEVANT only if it genuinely discusses, explains, or demonstrates the queried concept.
+A segment is NOT RELEVANT if it just contains words that look similar but the actual discussion is about something else.
+For example, if the query is about "vector databases" and a segment talks about "vectorless RAG" (a different concept), mark it as NOT relevant.
 
 User Query: "{query}"
 
@@ -1915,7 +1948,8 @@ Respond ONLY with valid JSON:
       "segment_index": 0,
       "start": 12.5,
       "end": 45.3,
-      "summary": "The speaker discusses..."
+      "summary": "Brief description of what this segment discusses and how it relates to the query",
+      "relevant": true
     }}
   ]
 }}"""
@@ -1931,8 +1965,9 @@ Respond ONLY with valid JSON:
 
 def _generate_topic_explanation(query: str, results: list) -> str:
     """
-    Generate a comprehensive explanation of the topic the user is searching for,
-    based on the found video segments. Returns a text paragraph.
+    Generate a comprehensive summary explanation about the user's query topic,
+    based on the found video segments. Shown below the video clips as a
+    "Topic Overview" section.
     """
     groq_key = os.getenv("GROQ_API_KEY", "").strip()
     google_key = os.getenv("GOOGLE_API_KEY", "").strip()
@@ -1945,23 +1980,29 @@ def _generate_topic_explanation(query: str, results: list) -> str:
     for r in results[:5]:
         text = r.get("text", "") or r.get("llm_summary", "")
         if text:
-            segments_context += f"- [{r['start']:.1f}s - {r['end']:.1f}s]: {text[:300]}\n"
+            segments_context += f"- [{r['start']:.1f}s - {r['end']:.1f}s]: {text[:400]}\n"
     if not segments_context:
         return ""
 
-    prompt = f"""Based on the following video segments found for the query "{query}", write a comprehensive 3-5 sentence explanation about this topic as discussed in the video.
+    prompt = f"""You are an expert content summarizer. Based on the video segments found for the user's query, write a comprehensive and informative summary.
 
-Write in a clear, informative style. Focus on:
-1. What the video covers about this topic
-2. Key points and details mentioned
-3. The overall context and significance
+User Query: "{query}"
 
-Video Segments:
+Found Video Segments:
 {segments_context}
+
+Write a clear, well-structured response that:
+1. Directly addresses the user's query based on what the video actually discusses
+2. Summarizes the key points, definitions, and explanations found in the video
+3. Highlights the most important takeaways
+4. Notes any practical examples or demonstrations if present
+5. Mentions which parts of the video are most valuable for the user's query
+
+IMPORTANT: Write in a natural, informative tone. Use 4-6 sentences. If the video segments don't strongly relate to the query, say so honestly rather than fabricating relevance.
 
 Respond ONLY with valid JSON:
 {{
-  "explanation": "Your detailed explanation here..."
+  "explanation": "Your comprehensive summary here..."
 }}"""
 
     try:

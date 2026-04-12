@@ -346,55 +346,84 @@ export default function Summarization() {
             </div>
           </div>
 
+          {/* User Query Display */}
+          <div className="p-4 rounded-xl bg-white/5 border border-white/10">
+            <p className="text-xs font-medium text-muted-foreground mb-1">Your Query</p>
+            <p className="text-sm text-foreground/90 font-medium italic">"{query}"</p>
+          </div>
+
+          {/* Topic Summary — shown BEFORE clips */}
+          {result?.topicExplanation && (
+            <Card className="border-violet-500/30 bg-gradient-to-br from-violet-500/5 to-purple-500/5">
+              <CardContent className="p-6">
+                <div className="flex items-start gap-3">
+                  <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-violet-500/15 text-violet-400 mt-0.5">
+                    <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg>
+                  </div>
+                  <div>
+                    <h3 className="text-base font-bold text-violet-300 mb-2">AI Summary</h3>
+                    <p className="text-foreground/80 leading-relaxed text-sm">
+                      {result.topicExplanation}
+                    </p>
+                  </div>
+                </div>
+              </CardContent>
+            </Card>
+          )}
+
           <Card className="gradient-card border-border/50">
             <CardHeader>
               <CardTitle>Relevant Segments ({result?.clips?.length || 0})</CardTitle>
               <CardDescription>All segments matching your query, ranked by relevance</CardDescription>
             </CardHeader>
             <CardContent className="space-y-6">
-              <div className={`grid gap-4 ${result?.clips?.length === 1 ? 'grid-cols-1' : 'grid-cols-1 md:grid-cols-2'}`}>
-                {result?.clips?.map((c) => (
-                  <div key={c.rank} className="space-y-2 border border-border p-3 rounded-lg bg-card/50">
-                    <div className="flex items-center gap-2 mb-1">
-                      <span className="text-xs font-bold bg-violet-500/20 text-violet-300 px-2 py-0.5 rounded">#{c.rank}</span>
-                      <span className="text-xs text-muted-foreground">{c.start.toFixed(1)}s — {c.end.toFixed(1)}s</span>
-                      <span className={`ml-auto text-xs px-2 py-0.5 rounded ${
-                        c.score >= 0.9 ? 'bg-green-500/15 text-green-400' :
-                        c.score >= 0.6 ? 'bg-yellow-500/15 text-yellow-400' :
-                        'bg-orange-500/15 text-orange-400'
-                      }`}>
-                        {c.score >= 0.9 ? 'High' : c.score >= 0.6 ? 'Medium' : 'Low'} relevance
-                      </span>
+              {result?.clips && result.clips.length > 0 ? (
+                <div className={`grid gap-4 ${result.clips.length === 1 ? 'grid-cols-1' : 'grid-cols-1 md:grid-cols-2'}`}>
+                  {result.clips.map((c) => (
+                    <div key={c.rank} className="space-y-2 border border-border p-3 rounded-lg bg-card/50">
+                      <div className="flex items-center gap-2 mb-1">
+                        <span className="text-xs font-bold bg-violet-500/20 text-violet-300 px-2 py-0.5 rounded">#{c.rank}</span>
+                        <span className="text-xs text-muted-foreground">{c.start.toFixed(1)}s — {c.end.toFixed(1)}s</span>
+                        <span className={`ml-auto text-xs px-2 py-0.5 rounded ${
+                          c.score >= 0.9 ? 'bg-green-500/15 text-green-400' :
+                          c.score >= 0.6 ? 'bg-yellow-500/15 text-yellow-400' :
+                          'bg-orange-500/15 text-orange-400'
+                        }`}>
+                          {c.score >= 0.9 ? 'High' : c.score >= 0.6 ? 'Medium' : 'Low'} relevance
+                        </span>
+                      </div>
+                      <VideoPlayer videoUrl={c.clip_url} autoPlay={false} />
+                      <div className="flex flex-col gap-2">
+                        {c.llm_summary && (
+                          <div className="mt-1 p-3 rounded-md bg-white/5 border border-white/10">
+                            <p className="text-xs font-semibold text-violet-400 mb-1">AI Analysis</p>
+                            <p className="text-sm leading-relaxed text-foreground/80">{c.llm_summary}</p>
+                          </div>
+                        )}
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          className="w-full text-xs"
+                          onClick={() => {
+                            const params = new URLSearchParams({ url: c.clip_url, score: c.score.toString(), start: c.start.toString(), end: c.end.toString() });
+                            window.location.href = `/download-clip?${params.toString()}`;
+                          }}
+                        >
+                          <Download className="mr-2 h-3 w-3" /> Download
+                        </Button>
+                      </div>
                     </div>
-                    <VideoPlayer videoUrl={c.clip_url} autoPlay={false} />
-                    <div className="flex flex-col gap-2">
-                      {c.llm_summary && (
-                        <div className="mt-1 p-3 rounded-md bg-white/5 border border-white/10">
-                          <p className="text-xs font-semibold text-violet-400 mb-1">AI Analysis</p>
-                          <p className="text-sm leading-relaxed text-foreground/80">{c.llm_summary}</p>
-                        </div>
-                      )}
-                      <Button
-                        size="sm"
-                        variant="outline"
-                        className="w-full text-xs"
-                        onClick={() => {
-                          const params = new URLSearchParams({ url: c.clip_url, score: c.score.toString(), start: c.start.toString(), end: c.end.toString() });
-                          window.location.href = `/download-clip?${params.toString()}`;
-                        }}
-                      >
-                        <Download className="mr-2 h-3 w-3" /> Download
-                      </Button>
-                    </div>
+                  ))}
+                </div>
+              ) : (
+                <div className="text-center py-12">
+                  <div className="flex h-16 w-16 items-center justify-center rounded-full bg-yellow-500/10 mx-auto mb-4">
+                    <svg xmlns="http://www.w3.org/2000/svg" width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="text-yellow-400"><circle cx="12" cy="12" r="10"/><path d="M12 8v4"/><path d="M12 16h.01"/></svg>
                   </div>
-                ))}
-              </div>
-
-              {result?.topicExplanation && (
-                <div className="mt-8 p-6 rounded-xl bg-violet-500/10 border border-violet-500/20">
-                  <h3 className="text-lg font-bold text-violet-300 mb-2">Topic Overview</h3>
-                  <p className="text-foreground/80 leading-relaxed text-sm">
-                    {result.topicExplanation}
+                  <h3 className="text-lg font-semibold text-foreground/80 mb-2">No Relevant Segments Found</h3>
+                  <p className="text-sm text-muted-foreground max-w-md mx-auto">
+                    The AI couldn't find segments in this video that substantively discuss your query. 
+                    Try rephrasing your query or using different keywords.
                   </p>
                 </div>
               )}

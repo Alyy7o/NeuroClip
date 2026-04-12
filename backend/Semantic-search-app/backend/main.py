@@ -6,6 +6,8 @@ import json
 import re
 import time
 import requests
+import yt_dlp
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import assemblyai as aai
 from pathlib import Path
 from typing import Optional
@@ -532,69 +534,134 @@ def process_video_workflow(
 ):
 
     """
-    Common workflow:
-    1. Transcribe (if SRT not provided)
-    2. Parse SRT
-    3. Generate Embeddings
-    4. Save to Database (Supabase)
+    Common workflow with PARALLEL PROCESSING:
+    1. OCR (frame extraction + text recognition)   ← runs in parallel
+    2. Transcribe (AssemblyAI or provided SRT)      ← runs in parallel
+    3. Merge OCR into transcript
+    4. Generate Embeddings
+    5. Save to Database (Supabase)
     """
+    pipeline_start = time.time()
     output_dir = REPO_ROOT / "output_data"
     output_dir.mkdir(parents=True, exist_ok=True)
-    
-    try:
-        ocr_text_data = []
-        from ocr_utils import extract_all_video_frames, run_ocr_on_frames as ocr_run
-        frames_dir = output_dir / "frames" / job_id
-        print(f"[OCR] Starting full-video frame extraction to {frames_dir}...")
-        count = extract_all_video_frames(saved_path, frames_dir)
-        if count > 0:
-            ocr_text_data = ocr_run(frames_dir)
-            print(f"[OCR] Completed: {len(ocr_text_data)} frames contained text")
-        else:
-            print("[OCR] No frames could be extracted from video")
-    except Exception as e:
-        print(f"[OCR ERROR] OCR/Frame extraction failed: {e}")
-
     srt_out = output_dir / f"{saved_path.stem}.srt"
-    
-    result = {
-        "id": "",
-        "status": "",
-        "text": "",
-        "srt_path": None,
-    }
-    
-    # 1. Transcribe or use provided SRT
-    if provided_srt_path and provided_srt_path.exists():
-        # Copy provided SRT to standard location
-        try:
-            shutil.copy2(provided_srt_path, srt_out)
-            srt_content = srt_out.read_text(encoding="utf-8", errors="replace")
-            result = {
-                "id": "yt_caption",
-                "status": "completed",
-                "text": srt_content, # Approximate text
-                "srt_path": srt_out
-            }
-        except Exception as e:
-            print(f"Failed to use provided SRT: {e}")
-            # Fallback to AssemblyAI?
-            pass
 
-    if not result.get("status") == "completed":
+    # =====================================================================
+    # PARALLEL TASK 1: OCR (Frame Extraction + Text Recognition)
+    # =====================================================================
+    def _run_ocr_task():
+        """Extract frames from video and run OCR on them. Runs in a thread."""
+        t0 = time.time()
+        try:
+            from ocr_utils import extract_all_video_frames, run_ocr_on_frames as ocr_run
+            frames_dir = output_dir / "frames" / job_id
+            print(f"[OCR] Starting full-video frame extraction to {frames_dir}...")
+            count = extract_all_video_frames(saved_path, frames_dir)
+            if count > 0:
+                ocr_results = ocr_run(frames_dir)
+                elapsed = time.time() - t0
+                print(f"[OCR] Completed in {elapsed:.1f}s: {len(ocr_results)} frames contained text")
+                return ocr_results
+            else:
+                print("[OCR] No frames could be extracted from video")
+                return []
+        except Exception as e:
+            print(f"[OCR ERROR] OCR/Frame extraction failed: {e}")
+            return []
+
+    # =====================================================================
+    # PARALLEL TASK 2: Transcription (AssemblyAI or provided SRT)
+    # =====================================================================
+    def _run_transcription_task():
+        """Transcribe video via AssemblyAI or use provided SRT. Runs in a thread."""
+        t0 = time.time()
+        result = {
+            "id": "",
+            "status": "",
+            "text": "",
+            "srt_path": None,
+        }
+
+        # Use provided SRT if available (YouTube captions)
+        if provided_srt_path and provided_srt_path.exists():
+            try:
+                shutil.copy2(provided_srt_path, srt_out)
+                srt_content = srt_out.read_text(encoding="utf-8", errors="replace")
+                result = {
+                    "id": "yt_caption",
+                    "status": "completed",
+                    "text": srt_content,
+                    "srt_path": srt_out
+                }
+                elapsed = time.time() - t0
+                print(f"[TRANSCRIPTION] Used provided SRT captions in {elapsed:.1f}s")
+                return result
+            except Exception as e:
+                print(f"[TRANSCRIPTION] Failed to use provided SRT: {e} — falling back to AssemblyAI")
+
         # AssemblyAI transcription
-        try:
-            result = generate_transcript_from_video(
-                source=str(saved_path),
-                output_srt_path=str(srt_out),
-                language_code=None,
-            )
-        except ValueError as e:
-            raise HTTPException(status_code=400, detail=str(e))
-        except Exception as e:
-            raise HTTPException(status_code=502, detail=f"Transcription failed: {e}")
+        if result.get("status") != "completed":
+            try:
+                print(f"[TRANSCRIPTION] Starting AssemblyAI transcription...")
+                result = generate_transcript_from_video(
+                    source=str(saved_path),
+                    output_srt_path=str(srt_out),
+                    language_code=None,
+                )
+                elapsed = time.time() - t0
+                print(f"[TRANSCRIPTION] AssemblyAI completed in {elapsed:.1f}s")
+            except ValueError as e:
+                raise e  # Will be caught in main thread
+            except Exception as e:
+                raise e  # Will be caught in main thread
 
-    # Convert SRT text to project JSON and save to output_data
+        return result
+
+    # =====================================================================
+    # RUN TASKS IN PARALLEL
+    # =====================================================================
+    print(f"[PIPELINE] Starting parallel processing for job {job_id}...")
+    parallel_start = time.time()
+
+    ocr_text_data = []
+    result = {"id": "", "status": "", "text": "", "srt_path": None}
+    transcription_error = None
+
+    with ThreadPoolExecutor(max_workers=2, thread_name_prefix="neuro") as executor:
+        # Submit both tasks simultaneously
+        ocr_future = executor.submit(_run_ocr_task)
+        transcription_future = executor.submit(_run_transcription_task)
+
+        # Collect results as they complete
+        for future in as_completed([ocr_future, transcription_future]):
+            try:
+                if future == ocr_future:
+                    ocr_text_data = future.result()
+                elif future == transcription_future:
+                    result = future.result()
+            except ValueError as e:
+                transcription_error = ("value", e)
+            except Exception as e:
+                transcription_error = ("general", e)
+
+    parallel_elapsed = time.time() - parallel_start
+    print(f"[PIPELINE] Parallel phase completed in {parallel_elapsed:.1f}s "
+          f"(OCR: {len(ocr_text_data)} text items, Transcription: {result.get('status', 'unknown')})")
+
+    # Handle transcription errors after parallel phase
+    if transcription_error:
+        err_type, err = transcription_error
+        if err_type == "value":
+            raise HTTPException(status_code=400, detail=str(err))
+        else:
+            raise HTTPException(status_code=502, detail=f"Transcription failed: {err}")
+
+    # =====================================================================
+    # SEQUENTIAL PHASE: Merge + Embed + Save
+    # =====================================================================
+    merge_start = time.time()
+
+    # Convert SRT text to project JSON
     srt_text = ""
     if result.get("srt_path"):
         try:
@@ -605,14 +672,8 @@ def process_video_workflow(
         srt_text = result.get("text")
     
     if not srt_text:
-         # Attempt to read if srt_out exists
          if srt_out.exists():
              srt_text = srt_out.read_text(encoding="utf-8", errors="replace")
-    
-    # If still no text, we might have an issue, but let's try parsing what we have
-    if not srt_text:
-        # It's possible AssemblyAI failed to generate SRT text in result but wrote to file
-        pass
 
     sentences = parse_srt_blocks(srt_text)
     
@@ -621,18 +682,15 @@ def process_video_workflow(
         for ocr_item in ocr_text_data:
             ts = ocr_item["timestamp"]
             text = ocr_item["text"]
-            # Find the best-matching sentence by proximity
             best_match = None
             best_dist = float('inf')
             for s in sentences:
                 s_start = float(s["starttime"])
                 s_end = float(s["endtime"])
-                # If OCR timestamp falls within the sentence window
                 if s_start <= ts <= s_end:
                     best_match = s
                     best_dist = 0
-                    break  # Exact match, no need to look further
-                # Otherwise track closest sentence within 5-second window
+                    break
                 dist = min(abs(s_start - ts), abs(s_end - ts))
                 if dist < 5.0 and dist < best_dist:
                     best_dist = dist
@@ -640,18 +698,17 @@ def process_video_workflow(
             if best_match is not None:
                 best_match["sentence"] += f" [On Screen: {text}]"
             else:
-                # Add as a new "synthetic" sentence if no match found
                 sentences.append({
                     "sentence": f"[Visual Content]: {text}",
                     "starttime": f"{ts:.2f}",
                     "endtime": f"{ts+2.0:.2f}",
                     "verbs": ["visual_ocr"]
                 })
-        # Keep sentences sorted by time
         sentences.sort(key=lambda x: float(x["starttime"]))
 
-    # If parsing failed or empty, sentences is []
-    
+    merge_elapsed = time.time() - merge_start
+    print(f"[PIPELINE] SRT parsing + OCR merge completed in {merge_elapsed:.1f}s ({len(sentences)} sentences)")
+
     duration_seconds = sentences[-1]["endtime"] if sentences else "0.00"
     meta = build_metadata({}, srt_path=str(saved_path.with_suffix('.srt')), video_path=str(saved_path))
     if duration_seconds and meta.get("duration") in (None, "N/A"):
@@ -660,6 +717,7 @@ def process_video_workflow(
     data = {"metadata": meta, "sentences": sentences}
     
     # Generate embeddings
+    embed_start = time.time()
     emb = {}
     try:
         vecs = get_model().encode([s["sentence"] for s in sentences])
@@ -673,6 +731,9 @@ def process_video_workflow(
         )
     except Exception:
         pass
+
+    embed_elapsed = time.time() - embed_start
+    print(f"[PIPELINE] Embedding generation completed in {embed_elapsed:.1f}s")
         
     json_path = output_dir / f"{saved_path.stem}.v4.json"
     try:
@@ -681,6 +742,7 @@ def process_video_workflow(
         raise HTTPException(status_code=500, detail=f"Failed to write JSON: {e}")
 
     # Persist to Supabase
+    db_start = time.time()
     history_saved = False
     try:
         if supabase is not None:
@@ -704,14 +766,11 @@ def process_video_workflow(
                 except Exception as e:
                     print("user_videos upsert failed:", e)
             
-            # Embeddings and vector search rows
-            # We try to insert into video_embeddings (twice in original code? seems like a copy-paste error in original, but I will consolidate)
             try:
                 avg_vec = None
                 transcript_text = " ".join([s.get("sentence", "") for s in sentences])
                 transcript_vec = None
                 
-                # Check if we have embeddings
                 if emb.get("vectors"):
                     import numpy as np
                     avg_vec = np.array(emb["vectors"], dtype=float).mean(axis=0).tolist()
@@ -737,7 +796,6 @@ def process_video_workflow(
                 }
                 supabase.table("video_embeddings").insert(ve_row).execute()
             except Exception as e:
-                # print("video_embeddings insert failed:", e)
                 pass
 
             # Save sentence embeddings
@@ -783,6 +841,17 @@ def process_video_workflow(
     except Exception:
         pass
 
+    db_elapsed = time.time() - db_start
+    total_elapsed = time.time() - pipeline_start
+    print(f"[PIPELINE] Database persistence completed in {db_elapsed:.1f}s")
+    print(f"[PIPELINE] ════════════════════════════════════════════")
+    print(f"[PIPELINE] TOTAL PROCESSING TIME: {total_elapsed:.1f}s")
+    print(f"[PIPELINE]   ├─ Parallel phase (OCR + Transcription): {parallel_elapsed:.1f}s")
+    print(f"[PIPELINE]   ├─ Merge + Parse: {merge_elapsed:.1f}s")
+    print(f"[PIPELINE]   ├─ Embeddings: {embed_elapsed:.1f}s")
+    print(f"[PIPELINE]   └─ Database: {db_elapsed:.1f}s")
+    print(f"[PIPELINE] ════════════════════════════════════════════")
+
     return {
         "message": "Processing complete",
         "job_id": job_id,
@@ -794,6 +863,7 @@ def process_video_workflow(
         "srt_path": str(srt_out),
         "data": data,
         "history_saved": history_saved,
+        "processing_time": round(total_elapsed, 2),
     }
 
 class UploadUrlRequest(BaseModel):
@@ -868,16 +938,22 @@ def upload_via_url(payload: UploadUrlRequest):
     # Check for ffmpeg to decide on format
     has_ffmpeg = shutil.which("ffmpeg") is not None
     
-    # Configure yt-dlp - Attempt 1: With Subtitles
+    # Configure yt-dlp with resilience options
     ydl_opts = {
-        'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best' if has_ffmpeg else 'best[ext=mp4]/best',
+        'format': 'bestvideo[ext=mp4][height<=1080]+bestaudio[ext=m4a]/best[ext=mp4][height<=1080]/best[ext=mp4]/best' if has_ffmpeg else 'best[ext=mp4]/best',
         'outtmpl': str(uploads_dir / f"{job_id}_%(title)s.%(ext)s"),
         'noplaylist': True,
         'writesubtitles': True,
         'writeautomaticsub': True,
         'subtitleslangs': ['en'],
         'convertsubtitles': 'srt',
-        # 'quiet': True,
+        'socket_timeout': 30,
+        'retries': 3,
+        'fragment_retries': 3,
+        'extractor_retries': 3,
+        'file_access_retries': 3,
+        'noprogress': True,
+        'no_warnings': False,
     }
     
     downloaded_video = None
@@ -889,25 +965,37 @@ def upload_via_url(payload: UploadUrlRequest):
             return ydl.prepare_filename(info)
 
     try:
+        # Attempt 1: With subtitles
         try:
+            print(f"[yt-dlp] Downloading with subtitles: {payload.url}")
             downloaded_video = run_download(ydl_opts)
             # Identify SRT file if successful
             base_name = Path(downloaded_video).stem
             potential_srts = list(uploads_dir.glob(f"{base_name}*.srt"))
             if potential_srts:
                 downloaded_srt = potential_srts[0]
-        except Exception:
-            print("yt-dlp download with subtitles failed (likely 429 or missing subs). Retrying without subtitles...")
-            # Fallback: Disable subtitles and retry
+                print(f"[yt-dlp] Found SRT captions: {downloaded_srt.name}")
+        except Exception as e1:
+            print(f"[yt-dlp] Download with subtitles failed: {type(e1).__name__}: {e1}")
+            print(f"[yt-dlp] Retrying without subtitles...")
+            # Attempt 2: Without subtitles
             ydl_opts['writesubtitles'] = False
             ydl_opts['writeautomaticsub'] = False
             ydl_opts.pop('subtitleslangs', None)
             ydl_opts.pop('convertsubtitles', None)
             
-            downloaded_video = run_download(ydl_opts)
+            try:
+                downloaded_video = run_download(ydl_opts)
+            except Exception as e2:
+                print(f"[yt-dlp] Second attempt also failed: {type(e2).__name__}: {e2}")
+                # Attempt 3: Simplest possible format
+                print(f"[yt-dlp] Trying simplest format fallback...")
+                ydl_opts['format'] = 'best[ext=mp4]/best'
+                downloaded_video = run_download(ydl_opts)
             
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Download failed after retry: {e}")
+        print(f"[yt-dlp] All download attempts failed: {type(e).__name__}: {e}")
+        raise HTTPException(status_code=500, detail=f"YouTube download failed: {e}")
     
     if not downloaded_video or not Path(downloaded_video).exists():
         raise HTTPException(status_code=500, detail="Video download failed or file empty")

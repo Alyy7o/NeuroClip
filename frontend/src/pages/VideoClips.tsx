@@ -58,7 +58,9 @@ export default function VideoClips() {
           .range(start, end)
         if (hErr) throw hErr
         setHistory(hist || [])
-        const eresp = await fetch(`${API_BASE}/video-embeddings?job_id=${id}`)
+        const eresp = await fetch(`${API_BASE}/video-embeddings?job_id=${id}`, {
+          headers: { 'ngrok-skip-browser-warning': 'true' }
+        })
         if (eresp.ok) {
           const ej = await eresp.json()
           setVe(ej)
@@ -90,14 +92,20 @@ export default function VideoClips() {
       setClips([])
       let resp = await fetch(`${API_BASE}/clips/search-db`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 
+          'Content-Type': 'application/json',
+          'ngrok-skip-browser-warning': 'true'
+        },
         body: JSON.stringify({ job_id: id, query: q, top_k: 5, margin_secs: 0.5, use_windows: useWindows, window_size: windowSize, window_stride: windowStride, expand_neighbors: expandNeighbors, min_clip_secs: minClipSecs, max_clip_secs: maxClipSecs, rerank: useRerank }),
       })
       if (!resp.ok) {
         try { const err = await resp.json(); console.warn('search-db failed:', err) } catch { }
         resp = await fetch(`${API_BASE}/clips/search`, {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: { 
+            'Content-Type': 'application/json',
+            'ngrok-skip-browser-warning': 'true'
+          },
           body: JSON.stringify({ job_id: id, query: q, top_k: 5, margin_secs: 0.5 }),
         })
       }

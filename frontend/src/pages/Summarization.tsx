@@ -148,6 +148,7 @@ export default function Summarization() {
           };
           xhr.onerror = () => reject(new Error('Network error'));
           xhr.open('POST', `${API_BASE}/upload-and-search`);
+          xhr.setRequestHeader('ngrok-skip-browser-warning', 'true');
           xhr.send(formData);
         });
 
@@ -181,7 +182,10 @@ export default function Summarization() {
         
         const resp = await fetch(`${API_BASE}/upload-via-url`, {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: { 
+            'Content-Type': 'application/json',
+            'ngrok-skip-browser-warning': 'true'
+          },
           body: JSON.stringify({ url, query, user_id: user?.id }),
         });
 
@@ -192,7 +196,10 @@ export default function Summarization() {
 
         const searchResp = await fetch(`${API_BASE}/clips/search`, {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: { 
+            'Content-Type': 'application/json',
+            'ngrok-skip-browser-warning': 'true'
+          },
           body: JSON.stringify({
             json_path: uploadData.json_path,
             query,

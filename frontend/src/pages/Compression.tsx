@@ -97,6 +97,7 @@ export default function Compression() {
         xhr.onerror = () => reject(new Error('Network error during upload'));
         
         xhr.open('POST', `${API_BASE}/compress-video`);
+        xhr.setRequestHeader('ngrok-skip-browser-warning', 'true');
         xhr.send(formData);
       });
 

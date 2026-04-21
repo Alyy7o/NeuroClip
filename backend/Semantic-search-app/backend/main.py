@@ -1097,13 +1097,13 @@ def clips_search(payload: ClipSearchRequest):
     clips_dir = out_dir / "clips" / (json_path.stem.split("_")[0])
     clips_dir.mkdir(parents=True, exist_ok=True)
 
-    # ── Strategy 1: Gemini Intelligent Search (reasoning-based) ──
-    gemini_segments = gemini_intelligent_search(payload.query, sentences, top_k=payload.top_k)
+    # ── Strategy 1: Substantive LLM Search (Groq/Gemini fallback) ──
+    llm_segments = llm_intelligent_search(payload.query, sentences, top_k=payload.top_k)
     
-    if gemini_segments:
-        print(f"[clips/search] Using Gemini reasoning: {len(gemini_segments)} segments found")
+    if llm_segments:
+        print(f"[clips/search] Using LLM reasoning: {len(llm_segments)} segments found")
         results = []
-        for rank, seg in enumerate(gemini_segments, 1):
+        for rank, seg in enumerate(llm_segments, 1):
             start = max(0.0, seg["start"] - payload.margin_secs)
             end = seg["end"] + payload.margin_secs
 
@@ -1804,7 +1804,7 @@ def _llm_generate(prompt: str, max_tokens: int = 4096) -> str:
     raise RuntimeError(f"All LLM providers failed: {'; '.join(errors)}")
 
 
-def gemini_intelligent_search(query: str, sentences: list, top_k: int = 10) -> list:
+def llm_intelligent_search(query: str, sentences: list, top_k: int = 10) -> list:
     """
     Use LLM to reason about the FULL transcript and find ALL segments
     that match the user's query. Works with Groq (primary) or Gemini (fallback).

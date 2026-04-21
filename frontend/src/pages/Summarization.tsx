@@ -108,9 +108,12 @@ export default function Summarization() {
     setUploadProgress(0);
 
     try {
-      const queryWithTime = `${query} [${startTime.toFixed(1)}s - ${endTime.toFixed(1)}s]`;
+      // Only include time range if the user explicitly trimmed the video (start > 0)
+      const cleanQuery = startTime > 0
+        ? `${query} [${startTime.toFixed(1)}s - ${endTime.toFixed(1)}s]`
+        : query;
       const validated = processingSchema.parse({
-        query: queryWithTime,
+        query: cleanQuery,
         url: url || '',
         fileName: file?.name
       });

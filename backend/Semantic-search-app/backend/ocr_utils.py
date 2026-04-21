@@ -6,7 +6,7 @@ from pathlib import Path
 # CONFIGURATION
 # ====================
 # Frame sampling: extract 1 frame every SAMPLE_INTERVAL seconds
-SAMPLE_INTERVAL = 3.0  # seconds between sampled frames
+SAMPLE_INTERVAL = 5.0  # seconds between sampled frames (5s = good coverage with 40% less compute)
 MIN_TEXT_LENGTH = 4     # minimum characters to keep OCR result
 
 print(f"--- [NeuroClip OCR] Direct EasyOCR mode (every {SAMPLE_INTERVAL}s) ---")

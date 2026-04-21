@@ -54,6 +54,7 @@ try:
     # Load each secret and inject into os.environ immediately
     os.environ["ASSEMBLYAI_API_KEY"]      = user_secrets.get_secret("ASSEMBLYAI_API_KEY")
     os.environ["GOOGLE_API_KEY"]          = user_secrets.get_secret("GOOGLE_API_KEY")
+    os.environ["GROQ_API_KEY"]            = user_secrets.get_secret("GROQ_API_KEY")
     os.environ["SUPABASE_SERVICE_ROLE_KEY"] = user_secrets.get_secret("SUPABASE_SERVICE_ROLE_KEY")
     os.environ["SUPABASE_URL"]            = user_secrets.get_secret("SUPABASE_URL")
     os.environ["VITE_SUPABASE_ANON_KEY"]  = user_secrets.get_secret("VITE_SUPABASE_ANON_KEY")
@@ -100,6 +101,9 @@ print(f"[startup] REPO_ROOT={REPO_ROOT}")
 print(f"[startup] ASSEMBLYAI_API_KEY={'SET (len='+str(len(_aai_key))+')' if _aai_key.strip() else 'NOT SET!'}")
 print(f"[startup] SUPABASE_URL={'SET' if os.getenv('SUPABASE_URL') else 'not set'}")
 print(f"[startup] GOOGLE_API_KEY={'SET' if os.getenv('GOOGLE_API_KEY') else 'not set'}")
+print(f"[startup] GROQ_API_KEY={'SET' if os.getenv('GROQ_API_KEY') else 'NOT SET — add to Kaggle secrets!'}")
+print(f"[startup] LLM Provider Priority: {'Groq → Gemini' if os.getenv('GROQ_API_KEY') else 'Gemini only'}")
+
 
 
 # Ensure required directories exist for StaticFiles
@@ -1097,8 +1101,15 @@ def clips_search(payload: ClipSearchRequest):
     clips_dir = out_dir / "clips" / (json_path.stem.split("_")[0])
     clips_dir.mkdir(parents=True, exist_ok=True)
 
-    # ── Strategy 1: Substantive LLM Search (Groq/Gemini fallback) ──
-    llm_segments = llm_intelligent_search(payload.query, sentences, top_k=payload.top_k)
+    # ── CLEAN QUERY: Strip appended timestamp noise like "[0.0s - 575.1s]" ──
+    clean_query = re.sub(r'\s*\[\d+\.?\d*s\s*-\s*\d+\.?\d*s\]\s*$', '', payload.query).strip()
+    if clean_query != payload.query:
+        print(f"[clips/search] Cleaned query: '{payload.query}' → '{clean_query}'")
+    if not clean_query:
+        clean_query = payload.query  # fallback if regex ate everything
+
+    # ── Strategy 1: Substantive LLM Search (Groq primary, Gemini fallback) ──
+    llm_segments = llm_intelligent_search(clean_query, sentences, top_k=payload.top_k)
     
     if llm_segments:
         print(f"[clips/search] Using LLM reasoning: {len(llm_segments)} segments found")
@@ -1152,21 +1163,38 @@ def clips_search(payload: ClipSearchRequest):
                     ff = None
             ok = False
             if ff:
-                cmd = [
+                # FAST: Try stream copy first (instant, no re-encoding)
+                cmd_fast = [
                     ff, "-y",
                     "-ss", str(start),
                     "-i", video_path,
                     "-t", str(dur),
-                    "-c:v", "libx264",
-                    "-c:a", "aac",
+                    "-c", "copy",
                     "-movflags", "+faststart",
                     str(clip_path),
                 ]
                 try:
-                    subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                    subprocess.run(cmd_fast, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30)
                     ok = clip_path.exists() and clip_path.stat().st_size > 1024
                 except Exception:
                     ok = False
+                # FALLBACK: Re-encode if stream copy failed
+                if not ok:
+                    cmd_slow = [
+                        ff, "-y",
+                        "-ss", str(start),
+                        "-i", video_path,
+                        "-t", str(dur),
+                        "-c:v", "libx264", "-preset", "ultrafast",
+                        "-c:a", "aac",
+                        "-movflags", "+faststart",
+                        str(clip_path),
+                    ]
+                    try:
+                        subprocess.run(cmd_slow, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                        ok = clip_path.exists() and clip_path.stat().st_size > 1024
+                    except Exception:
+                        ok = False
             if not ok:
                 clip_path = None
             clip_rel = clip_path.relative_to(out_dir) if clip_path else None
@@ -1187,11 +1215,11 @@ def clips_search(payload: ClipSearchRequest):
             })
 
         # Generate topic explanation
-        topic_explanation = _generate_topic_explanation(payload.query, results)
+        topic_explanation = _generate_topic_explanation(clean_query, results)
         return {"results": results, "count": len(results), "topic_explanation": topic_explanation}
 
     # ── Strategy 2: Embedding-based search (fallback) ──
-    print("[clips/search] Gemini unavailable or returned no results — using embedding search")
+    print(f"[clips/search] LLM search unavailable or returned no results — using embedding search (query='{clean_query}')")
     
     emb_path = json_path.with_name(json_path.stem.replace(".v4", "") + ".embeddings.json")
     vectors = None
@@ -1220,7 +1248,7 @@ def clips_search(payload: ClipSearchRequest):
         return sum(x*y for x, y in zip(a, b))
     def norm(a):
         return math.sqrt(sum(x*x for x in a))
-    q_vec = list(map(float, get_model().encode([payload.query])[0]))
+    q_vec = list(map(float, get_model().encode([clean_query])[0]))
     
     # Advanced Search Logic (sliding window)
     candidates = []
@@ -1326,21 +1354,38 @@ def clips_search(payload: ClipSearchRequest):
                 ff = None
         ok = False
         if ff:
-            cmd = [
+            # FAST: Try stream copy first (instant, no re-encoding)
+            cmd_fast = [
                 ff, "-y",
                 "-ss", str(start),
                 "-i", video_path,
                 "-t", str(dur),
-                "-c:v", "libx264",
-                "-c:a", "aac",
+                "-c", "copy",
                 "-movflags", "+faststart",
                 str(clip_path),
             ]
             try:
-                subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                subprocess.run(cmd_fast, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30)
                 ok = clip_path.exists() and clip_path.stat().st_size > 1024
             except Exception:
                 ok = False
+            # FALLBACK: Re-encode if stream copy failed
+            if not ok:
+                cmd_slow = [
+                    ff, "-y",
+                    "-ss", str(start),
+                    "-i", video_path,
+                    "-t", str(dur),
+                    "-c:v", "libx264", "-preset", "ultrafast",
+                    "-c:a", "aac",
+                    "-movflags", "+faststart",
+                    str(clip_path),
+                ]
+                try:
+                    subprocess.run(cmd_slow, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                    ok = clip_path.exists() and clip_path.stat().st_size > 1024
+                except Exception:
+                    ok = False
         if not ok:
             clip_path = None
         clip_rel = clip_path.relative_to(out_dir) if clip_path else None
@@ -1364,7 +1409,7 @@ def clips_search(payload: ClipSearchRequest):
             {"index": i, "text": r["text"], "start": r["start"], "end": r["end"]}
             for i, r in enumerate(results)
         ]
-        llm_results = refine_with_llm(payload.query, llm_candidates)
+        llm_results = refine_with_llm(clean_query, llm_candidates)
         llm_map = {item["segment_index"]: item for item in llm_results}
         
         filtered_results = []
@@ -1387,7 +1432,7 @@ def clips_search(payload: ClipSearchRequest):
         print(f"LLM enrichment failed in clips_search: {e}")
 
     # Generate topic explanation
-    topic_explanation = _generate_topic_explanation(payload.query, results)
+    topic_explanation = _generate_topic_explanation(clean_query, results)
 
     return {"results": results, "count": len(results), "topic_explanation": topic_explanation}
 

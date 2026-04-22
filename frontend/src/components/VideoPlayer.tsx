@@ -19,6 +19,7 @@ export function VideoPlayer({ videoUrl, autoPlay = false }: VideoPlayerProps) {
   const [volume, setVolume] = useState(1);
   const [isMuted, setIsMuted] = useState(false);
   const [showControls, setShowControls] = useState(true);
+  const [isFullscreen, setIsFullscreen] = useState(false);
 
   // Check if the video is a YouTube URL
   const youtubeVideoId = getYouTubeVideoId(videoUrl);
@@ -65,6 +66,51 @@ export function VideoPlayer({ videoUrl, autoPlay = false }: VideoPlayerProps) {
       }
     };
   }, [videoUrl, isYouTubeVideo]);
+
+  // Keyboard controls
+  useEffect(() => {
+    const container = containerRef.current;
+    if (!container) return;
+
+    const handleKeyDown = (e: KeyboardEvent) => {
+      // Don't intercept if user is typing in an input/textarea
+      const tag = (e.target as HTMLElement)?.tagName;
+      if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
+
+      switch (e.key) {
+        case ' ':
+        case 'Spacebar':
+          e.preventDefault();
+          togglePlayPause();
+          break;
+        case 'ArrowLeft':
+          e.preventDefault();
+          skip(-5);
+          break;
+        case 'ArrowRight':
+          e.preventDefault();
+          skip(5);
+          break;
+        case 'f':
+        case 'F':
+          e.preventDefault();
+          toggleFullscreen();
+          break;
+      }
+    };
+
+    container.addEventListener('keydown', handleKeyDown);
+    return () => container.removeEventListener('keydown', handleKeyDown);
+  }, [isPlaying, blobUrl]);
+
+  // Sync fullscreen state when user exits via Escape
+  useEffect(() => {
+    const handleFullscreenChange = () => {
+      setIsFullscreen(!!document.fullscreenElement);
+    };
+    document.addEventListener('fullscreenchange', handleFullscreenChange);
+    return () => document.removeEventListener('fullscreenchange', handleFullscreenChange);
+  }, []);
 
   useEffect(() => {
     const video = videoRef.current;
@@ -172,6 +218,8 @@ export function VideoPlayer({ videoUrl, autoPlay = false }: VideoPlayerProps) {
       initial={{ opacity: 0, scale: 0.95 }}
       animate={{ opacity: 1, scale: 1 }}
       className="relative bg-black rounded-lg overflow-hidden group"
+      tabIndex={0}
+      style={{ outline: 'none' }}
     >
       {blobUrl ? (
         <video

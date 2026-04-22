@@ -261,21 +261,29 @@ export default function History() {
                           ) : (
                             <Button
                               size="sm"
-                              onClick={() => {
+                              onClick={async () => {
                                 if (!v?.video_url) return;
                                 const API_BASE = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8040';
-                                // If URL starts with /static, it's a relative path on the server
                                 const downloadUrl = v.video_url.startsWith('http') 
                                   ? v.video_url 
                                   : `${API_BASE}${v.video_url}`;
-                                
-                                const link = document.createElement('a');
-                                link.href = downloadUrl;
-                                link.download = v.video_url.split('/').pop() || 'video.mp4';
-                                link.target = '_blank';
-                                document.body.appendChild(link);
-                                link.click();
-                                document.body.removeChild(link);
+                                try {
+                                  const resp = await fetch(downloadUrl, {
+                                    headers: { 'ngrok-skip-browser-warning': 'true' },
+                                  });
+                                  if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+                                  const blob = await resp.blob();
+                                  const blobUrl = URL.createObjectURL(blob);
+                                  const link = document.createElement('a');
+                                  link.href = blobUrl;
+                                  link.download = v.video_url.split('/').pop() || 'video.mp4';
+                                  document.body.appendChild(link);
+                                  link.click();
+                                  document.body.removeChild(link);
+                                  URL.revokeObjectURL(blobUrl);
+                                } catch {
+                                  window.open(downloadUrl, '_blank');
+                                }
                               }}
                               className="gradient-primary w-full sm:w-auto"
                             >
@@ -288,15 +296,30 @@ export default function History() {
                             <Button
                               size="sm"
                               variant="outline"
-                              onClick={() => {
+                              onClick={async () => {
                                 const API_BASE = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8040';
                                 const filename = v.video_url?.split(/[/\\]/).pop();
                                 if (!filename) return;
                                 
-                                // Guess path based on typical structure if not absolute
                                 const path = v.video_url?.includes('uploads') ? `uploads/${filename}` : `clips/${filename}`;
                                 const downloadUrl = `${API_BASE}/download?path=${path}`;
-                                window.open(downloadUrl, '_blank');
+                                try {
+                                  const resp = await fetch(downloadUrl, {
+                                    headers: { 'ngrok-skip-browser-warning': 'true' },
+                                  });
+                                  if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+                                  const blob = await resp.blob();
+                                  const blobUrl = URL.createObjectURL(blob);
+                                  const link = document.createElement('a');
+                                  link.href = blobUrl;
+                                  link.download = filename || 'video.mp4';
+                                  document.body.appendChild(link);
+                                  link.click();
+                                  document.body.removeChild(link);
+                                  URL.revokeObjectURL(blobUrl);
+                                } catch {
+                                  window.open(downloadUrl, '_blank');
+                                }
                               }}
                               className="w-full sm:w-auto"
                             >

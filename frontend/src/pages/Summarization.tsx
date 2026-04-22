@@ -414,9 +414,25 @@ export default function Summarization() {
                           size="sm"
                           variant="outline"
                           className="w-full text-xs"
-                          onClick={() => {
-                            const params = new URLSearchParams({ url: c.clip_url, score: c.score.toString(), start: c.start.toString(), end: c.end.toString() });
-                            window.location.href = `/download-clip?${params.toString()}`;
+                          onClick={async () => {
+                            try {
+                              const resp = await fetch(c.clip_url, {
+                                headers: { 'ngrok-skip-browser-warning': 'true' },
+                              });
+                              if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+                              const blob = await resp.blob();
+                              const blobUrl = URL.createObjectURL(blob);
+                              const link = document.createElement('a');
+                              link.href = blobUrl;
+                              link.download = `clip_${c.rank}_${c.start.toFixed(0)}s-${c.end.toFixed(0)}s.mp4`;
+                              document.body.appendChild(link);
+                              link.click();
+                              document.body.removeChild(link);
+                              URL.revokeObjectURL(blobUrl);
+                            } catch {
+                              // Fallback: open in new tab
+                              window.open(c.clip_url, '_blank');
+                            }
                           }}
                         >
                           <Download className="mr-2 h-3 w-3" /> Download

@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import { formatTimestamp } from '@/lib/formatTime';
 import { motion, AnimatePresence } from 'framer-motion';
 import { EyeOff, Play, Download, RotateCcw } from 'lucide-react';
 import { DashboardLayout } from '@/components/DashboardLayout';
@@ -66,7 +67,7 @@ export default function Blurring() {
     setProcessing(true);
 
     try {
-      const queryWithTime = `${query} (Time range: ${timeRange.start.toFixed(1)}s - ${timeRange.end.toFixed(1)}s)`;
+      const queryWithTime = `${query} (Time range: ${formatTimestamp(timeRange.start)} - ${formatTimestamp(timeRange.end)})`;
       
       const validationResult = processingSchema.safeParse({
         query: queryWithTime,
@@ -105,11 +106,11 @@ export default function Blurring() {
         processedVideoUrl: mockVideoUrl,
         explanation: `Your video has been successfully processed with blurring applied based on your instructions: "${query}". 
 
-The blurring effect has been applied to the selected time range from ${timeRange.start.toFixed(1)}s to ${timeRange.end.toFixed(1)}s. The specified objects or areas have been intelligently detected and blurred throughout this segment.
+The blurring effect has been applied to the selected time range from ${formatTimestamp(timeRange.start)} to ${formatTimestamp(timeRange.end)}. The specified objects or areas have been intelligently detected and blurred throughout this segment.
 
 **Processing Details:**
-- Original duration: ${timeRange.end.toFixed(1)}s
-- Processed segment: ${(timeRange.end - timeRange.start).toFixed(1)}s
+- Original duration: ${formatTimestamp(timeRange.end)}
+- Processed segment: ${formatTimestamp(timeRange.end - timeRange.start)}
 - Blur algorithm: Gaussian blur with adaptive tracking
 - Quality preservation: 95%
 
@@ -178,7 +179,7 @@ The processed video maintains the original resolution and frame rate while apply
               <CardHeader>
                 <CardTitle>Processed Video</CardTitle>
                 <CardDescription>
-                  Duration: {result?.duration?.toFixed(1)}s
+                  Duration: {formatTimestamp(result?.duration || 0)}
                 </CardDescription>
               </CardHeader>
               <CardContent className="space-y-6">

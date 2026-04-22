@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { ScissorsLineDashed, Play, Download, ArrowLeft, RotateCcw } from 'lucide-react';
+import { formatTimestamp } from '@/lib/formatTime';
 import { DashboardLayout } from '@/components/DashboardLayout';
 import { VideoInput } from '@/components/VideoInput';
 import { VideoPreview } from '@/components/VideoPreview';
@@ -180,8 +181,8 @@ export default function Summarization() {
           topicExplanation: uploadData.topic_explanation,
         });
       } else if (url) {
-        setCurrentStep(0);
-        setUploadProgress(50); // URL processing doesn't have a "file upload" progress, so we mock it
+        setCurrentStep(1); // Skip "Uploading" step — server downloads the video directly
+        setUploadProgress(100);
         
         const resp = await fetch(`${API_BASE}/upload-via-url`, {
           method: 'POST',
@@ -393,7 +394,7 @@ export default function Summarization() {
                     <div key={c.rank} className="space-y-2 border border-border p-3 rounded-lg bg-card/50">
                       <div className="flex items-center gap-2 mb-1">
                         <span className="text-xs font-bold bg-violet-500/20 text-violet-300 px-2 py-0.5 rounded">#{c.rank}</span>
-                        <span className="text-xs text-muted-foreground">{c.start.toFixed(1)}s — {c.end.toFixed(1)}s</span>
+                        <span className="text-xs text-muted-foreground">{formatTimestamp(c.start)} — {formatTimestamp(c.end)}</span>
                         <span className={`ml-auto text-xs px-2 py-0.5 rounded ${
                           c.score >= 0.9 ? 'bg-green-500/15 text-green-400' :
                           c.score >= 0.6 ? 'bg-yellow-500/15 text-yellow-400' :

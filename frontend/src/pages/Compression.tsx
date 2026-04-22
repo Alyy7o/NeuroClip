@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import { formatTimestamp } from '@/lib/formatTime';
 import { motion, AnimatePresence } from 'framer-motion';
 import { Minimize2, Play, Download, RotateCcw } from 'lucide-react';
 import { DashboardLayout } from '@/components/DashboardLayout';
@@ -252,7 +253,7 @@ Compression Statistics:
               <CardHeader>
                 <CardTitle>Compressed Video Result</CardTitle>
                 <CardDescription className="flex flex-col gap-1">
-                  <span>Video length: {result?.duration?.toFixed(1)}s</span>
+                  <span>Video length: {formatTimestamp(result?.duration || 0)}</span>
                   {result?.durationSeconds && (
                     <span className="text-primary font-medium">
                       Compression time: {result.durationSeconds.toFixed(1)}s

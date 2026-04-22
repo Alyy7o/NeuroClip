@@ -827,6 +827,15 @@ def process_video_workflow(
             # Save processing history
             if user_id:
                 try:
+                    # Ensure user profile exists (avoids FK constraint violation)
+                    try:
+                        supabase.table("profiles").upsert(
+                            {"id": user_id},
+                            on_conflict="id"
+                        ).execute()
+                    except Exception as profile_err:
+                        print(f"Profile upsert skipped: {profile_err}")
+
                     history_data = {
                         "user_id": user_id,
                         "job_id": job_id,
@@ -911,6 +920,11 @@ def upload_via_url(payload: UploadUrlRequest):
                          new_job_id = old_job_id # Reuse job_id logic? Or create new? The system uses job_id as video_id.
                          # If we reuse job_id, we just point to same video.
                          try:
+                             # Ensure profile exists
+                             try:
+                                 supabase.table("profiles").upsert({"id": payload.user_id}, on_conflict="id").execute()
+                             except Exception:
+                                 pass
                              history_data = {
                                 "user_id": payload.user_id,
                                 "job_id": old_job_id,
@@ -944,7 +958,7 @@ def upload_via_url(payload: UploadUrlRequest):
     
     # Configure yt-dlp with resilience options
     ydl_opts = {
-        'format': 'bestvideo[ext=mp4][height<=1080]+bestaudio[ext=m4a]/best[ext=mp4][height<=1080]/best[ext=mp4]/best' if has_ffmpeg else 'best[ext=mp4]/best',
+        'format': 'bestvideo[vcodec^=avc1][height<=1080]+bestaudio[ext=m4a]/bestvideo[vcodec^=avc1]+bestaudio/best[vcodec^=avc1]/best[ext=mp4][height<=1080]/best[ext=mp4]/best' if has_ffmpeg else 'best[vcodec^=avc1]/best[ext=mp4]/best',
         'outtmpl': str(uploads_dir / f"{job_id}_%(title)s.%(ext)s"),
         'noplaylist': True,
         'writesubtitles': True,
@@ -1663,6 +1677,11 @@ async def upload_and_search(
                 pass
             if user_id:
                 try:
+                    # Ensure profile exists
+                    try:
+                        supabase.table("profiles").upsert({"id": user_id}, on_conflict="id").execute()
+                    except Exception:
+                        pass
                     supabase.table("processing_history").insert({
                         "user_id": user_id,
                         "job_id": job_id,
@@ -2751,6 +2770,11 @@ async def compress_video(
 
             # A. processing_history (The job log)
             if user_id:
+                # Ensure profile exists
+                try:
+                    supabase.table("profiles").upsert({"id": user_id}, on_conflict="id").execute()
+                except Exception:
+                    pass
                 supabase.table("processing_history").insert({
                     "user_id":    user_id,
                     "job_id":     job_id,

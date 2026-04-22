@@ -1,4 +1,5 @@
 import { Download } from 'lucide-react'
+import { formatTimestamp } from '@/lib/formatTime'
 import { useEffect, useState } from 'react'
 import { useParams, useSearchParams } from 'react-router-dom'
 import { DashboardLayout } from '@/components/DashboardLayout'
@@ -185,7 +186,7 @@ export default function VideoClips() {
                 {clips.map((c, i) => (
                   <div key={c.clip_url || `${c.rank}-${i}`} className="space-y-2">
                     {c.clip_url ? <VideoPlayer key={c.clip_url} videoUrl={c.clip_url} autoPlay={false} /> : <div className="text-sm text-muted-foreground">Clip not available</div>}
-                    <div className="text-sm text-muted-foreground">{c.start.toFixed(2)}s - {c.end.toFixed(2)}s • score {c.score.toFixed(3)}</div>
+                    <div className="text-sm text-muted-foreground">{formatTimestamp(c.start)} - {formatTimestamp(c.end)} • score {c.score.toFixed(3)}</div>
                     <div className="text-sm">{c.text}</div>
                     {c.clip_url && (
                       <Button variant="outline" size="sm" className="w-full mt-1" onClick={() => {

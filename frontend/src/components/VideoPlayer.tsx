@@ -24,6 +24,48 @@ export function VideoPlayer({ videoUrl, autoPlay = false }: VideoPlayerProps) {
   const youtubeVideoId = getYouTubeVideoId(videoUrl);
   const isYouTubeVideo = !!youtubeVideoId;
 
+  // For non-YouTube and non-blob URLs, fetch with ngrok header and convert to blob
+  const [blobUrl, setBlobUrl] = useState<string | null>(null);
+  const [loadError, setLoadError] = useState(false);
+
+  useEffect(() => {
+    // Skip blob fetching for YouTube, blob:, or data: URLs
+    if (isYouTubeVideo || videoUrl.startsWith('blob:') || videoUrl.startsWith('data:')) {
+      setBlobUrl(videoUrl);
+      return;
+    }
+
+    let cancelled = false;
+    const fetchVideo = async () => {
+      try {
+        const resp = await fetch(videoUrl, {
+          headers: { 'ngrok-skip-browser-warning': 'true' },
+        });
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+        const blob = await resp.blob();
+        if (!cancelled) {
+          const url = URL.createObjectURL(blob);
+          setBlobUrl(url);
+        }
+      } catch (err) {
+        console.error('[VideoPlayer] Failed to fetch video:', err);
+        if (!cancelled) {
+          // Fallback: try the raw URL directly (works for local dev without ngrok)
+          setBlobUrl(videoUrl);
+          setLoadError(true);
+        }
+      }
+    };
+    fetchVideo();
+
+    return () => {
+      cancelled = true;
+      if (blobUrl && blobUrl.startsWith('blob:')) {
+        URL.revokeObjectURL(blobUrl);
+      }
+    };
+  }, [videoUrl, isYouTubeVideo]);
+
   useEffect(() => {
     const video = videoRef.current;
     if (!video) return;
@@ -31,7 +73,7 @@ export function VideoPlayer({ videoUrl, autoPlay = false }: VideoPlayerProps) {
     if (autoPlay) {
       video.play();
     }
-  }, [autoPlay]);
+  }, [autoPlay, blobUrl]);
 
   const togglePlayPause = () => {
     if (videoRef.current) {
@@ -131,14 +173,23 @@ export function VideoPlayer({ videoUrl, autoPlay = false }: VideoPlayerProps) {
       animate={{ opacity: 1, scale: 1 }}
       className="relative bg-black rounded-lg overflow-hidden group"
     >
-      <video
-        ref={videoRef}
-        src={videoUrl}
-        onTimeUpdate={handleTimeUpdate}
-        onLoadedMetadata={handleLoadedMetadata}
-        className="w-full aspect-video object-contain"
-        onClick={togglePlayPause}
-      />
+      {blobUrl ? (
+        <video
+          ref={videoRef}
+          src={blobUrl}
+          onTimeUpdate={handleTimeUpdate}
+          onLoadedMetadata={handleLoadedMetadata}
+          className="w-full aspect-video object-contain"
+          onClick={togglePlayPause}
+        />
+      ) : (
+        <div className="w-full aspect-video flex items-center justify-center bg-black/80">
+          <div className="flex flex-col items-center gap-2">
+            <div className="h-8 w-8 animate-spin rounded-full border-2 border-violet-400 border-t-transparent" />
+            <span className="text-xs text-white/60">Loading video…</span>
+          </div>
+        </div>
+      )}
 
       {/* Controls Overlay */}
       <div className="absolute bottom-0 left-0 right-0 bg-gradient-to-t from-black/90 via-black/60 to-transparent p-2 sm:p-4 space-y-2 sm:space-y-3">

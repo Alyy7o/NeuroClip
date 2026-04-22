@@ -29,25 +29,50 @@ export default function DownloadClip() {
     }
 
     const handleDownload = () => {
-        // Handle clip_url that might be absolute or relative, and strip query params
-        const rawUrl = clipUrl.split('?')[0];
+        // clip URLs can be:
+        // 1. Full: https://xxx.ngrok.app/serve-clip?path=clips/UUID/clip_01.mp4
+        // 2. Relative: /serve-clip?path=clips/UUID/clip_01.mp4
+        // 3. Legacy: /static/clips/UUID/clip_01.mp4
         let path = '';
-        if (rawUrl.includes('/static/')) {
-            path = rawUrl.split('/static/')[1];
-        } else {
-            // Fallback if structure is unexpected
-            path = rawUrl.split('/').pop() || '';
-            if (path) path = `clips/${path}`;
+
+        try {
+            const urlObj = new URL(clipUrl, window.location.origin);
+            // Check if it's a /serve-clip?path=... URL
+            const servePath = urlObj.searchParams.get('path');
+            if (servePath) {
+                path = servePath; // e.g., "clips/UUID/clip_01.mp4"
+            } else if (urlObj.pathname.includes('/static/')) {
+                path = urlObj.pathname.split('/static/')[1];
+            }
+        } catch {
+            // Fallback: try regex
+            const match = clipUrl.match(/[?&]path=([^&]+)/);
+            if (match) {
+                path = decodeURIComponent(match[1]);
+            }
         }
 
         if (!path) return;
 
-        const link = document.createElement('a');
-        link.href = `${API_BASE}/download?path=output_data/${path}`;
-        link.download = path.split('/').pop() || 'clip.mp4';
-        document.body.appendChild(link);
-        link.click();
-        document.body.removeChild(link);
+        // Use fetch with ngrok header to download as blob
+        fetch(`${API_BASE}/serve-clip?path=${encodeURIComponent(path)}`, {
+            headers: { 'ngrok-skip-browser-warning': 'true' },
+        })
+        .then(r => r.blob())
+        .then(blob => {
+            const url = URL.createObjectURL(blob);
+            const link = document.createElement('a');
+            link.href = url;
+            link.download = path.split('/').pop() || 'clip.mp4';
+            document.body.appendChild(link);
+            link.click();
+            document.body.removeChild(link);
+            URL.revokeObjectURL(url);
+        })
+        .catch(() => {
+            // Fallback: open serve-clip URL directly
+            window.open(`${API_BASE}/serve-clip?path=${encodeURIComponent(path)}`, '_blank');
+        });
     };
 
     return (

@@ -189,24 +189,39 @@ export default function VideoClips() {
                     <div className="text-sm">{c.text}</div>
                     {c.clip_url && (
                       <Button variant="outline" size="sm" className="w-full mt-1" onClick={() => {
-                        const rawUrl = c.clip_url?.split('?')[0] || '';
+                        const clipUrlStr = c.clip_url || '';
                         let path = '';
-                        if (rawUrl.includes('/static/')) {
-                          path = rawUrl.split('/static/')[1];
-                        } else {
-                          // Fallback
-                          path = rawUrl.split('/').pop() || '';
-                          if (path) path = `clips/${path}`; // Guess based on common structure
+                        try {
+                          const urlObj = new URL(clipUrlStr, window.location.origin);
+                          const servePath = urlObj.searchParams.get('path');
+                          if (servePath) {
+                            path = servePath;
+                          } else if (urlObj.pathname.includes('/static/')) {
+                            path = urlObj.pathname.split('/static/')[1];
+                          }
+                        } catch {
+                          const match = clipUrlStr.match(/[?&]path=([^&]+)/);
+                          if (match) path = decodeURIComponent(match[1]);
                         }
-
                         if (!path) return;
 
-                        const link = document.createElement('a');
-                        link.href = `${API_BASE}/download?path=output_data/${path}`;
-                        link.download = path.split('/').pop() || 'clip.mp4';
-                        document.body.appendChild(link);
-                        link.click();
-                        document.body.removeChild(link);
+                        fetch(`${API_BASE}/serve-clip?path=${encodeURIComponent(path)}`, {
+                          headers: { 'ngrok-skip-browser-warning': 'true' },
+                        })
+                        .then(r => r.blob())
+                        .then(blob => {
+                          const url = URL.createObjectURL(blob);
+                          const link = document.createElement('a');
+                          link.href = url;
+                          link.download = path.split('/').pop() || 'clip.mp4';
+                          document.body.appendChild(link);
+                          link.click();
+                          document.body.removeChild(link);
+                          URL.revokeObjectURL(url);
+                        })
+                        .catch(() => {
+                          window.open(`${API_BASE}/serve-clip?path=${encodeURIComponent(path)}`, '_blank');
+                        });
                       }}>
                         <Download className="h-4 w-4 mr-2" />
                         Download

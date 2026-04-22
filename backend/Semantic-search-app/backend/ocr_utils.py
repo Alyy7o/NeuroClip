@@ -7,11 +7,61 @@ from pathlib import Path
 # ====================
 # CONFIGURATION
 # ====================
-# Frame sampling: extract 1 frame every SAMPLE_INTERVAL seconds
-SAMPLE_INTERVAL = 5.0  # seconds between sampled frames (5s = good coverage with 40% less compute)
+SAMPLE_INTERVAL = 5.0   # default seconds between sampled frames
+MAX_FRAMES = 1000       # cap total OCR frames to avoid spending hours on OCR
 MIN_TEXT_LENGTH = 4     # minimum characters to keep OCR result
 
-print(f"--- [NeuroClip OCR] Direct EasyOCR mode (every {SAMPLE_INTERVAL}s) ---")
+# Adaptive sampling thresholds (duration_seconds -> sample_interval)
+# For very long videos, sample less frequently to stay under MAX_FRAMES
+ADAPTIVE_INTERVALS = [
+    (7200,  30.0),   # > 2 hours  → every 30s
+    (3600,  20.0),   # > 1 hour   → every 20s
+    (1800,  10.0),   # > 30 min   → every 10s
+    (0,      5.0),   # default    → every 5s
+]
+
+# Videos longer than this use FFmpeg directly (OpenCV seeking is too slow on large H.264)
+FFMPEG_THRESHOLD_SECONDS = 1800  # 30 minutes
+
+print(f"--- [NeuroClip OCR] Direct EasyOCR mode (adaptive interval, max {MAX_FRAMES} frames) ---")
+
+# ====================
+# HELPERS
+# ====================
+
+def _get_adaptive_interval(duration_seconds: float) -> float:
+    """Pick a sample interval based on video duration to keep frame count manageable."""
+    for threshold, interval in ADAPTIVE_INTERVALS:
+        if duration_seconds > threshold:
+            return interval
+    return SAMPLE_INTERVAL
+
+
+def _get_video_duration(video_path) -> float:
+    """Get video duration using ffprobe (reliable) or OpenCV (fallback)."""
+    ffprobe_bin = shutil.which("ffprobe")
+    if ffprobe_bin:
+        try:
+            result = subprocess.run(
+                [ffprobe_bin, "-v", "error", "-show_entries", "format=duration",
+                 "-of", "default=noprint_wrappers=1:nokey=1", str(video_path)],
+                capture_output=True, text=True, timeout=30
+            )
+            if result.returncode == 0 and result.stdout.strip():
+                return float(result.stdout.strip())
+        except Exception:
+            pass
+
+    # Fallback: use OpenCV to get duration
+    cap = cv2.VideoCapture(str(video_path))
+    if cap.isOpened():
+        fps = cap.get(cv2.CAP_PROP_FPS) or 24.0
+        total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        cap.release()
+        if total > 0 and fps > 0:
+            return total / fps
+    return 0.0
+
 
 # ====================
 # FRAME EXTRACTION
@@ -19,93 +69,117 @@ print(f"--- [NeuroClip OCR] Direct EasyOCR mode (every {SAMPLE_INTERVAL}s) ---")
 
 def _extract_frames_ffmpeg(video_path, output_dir, sample_interval=SAMPLE_INTERVAL):
     """
-    Fallback frame extraction using FFmpeg subprocess.
-    Works with ANY codec (AV1, VP9, H.265, etc.) that FFmpeg supports.
+    Frame extraction using FFmpeg subprocess.
+    Works with ANY codec (AV1, VP9, H.265, H.264, etc.) and handles
+    long videos efficiently via sequential decoding.
     """
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
     ffmpeg_bin = shutil.which("ffmpeg")
     if not ffmpeg_bin:
-        print("[OCR] FFmpeg not found on PATH — cannot use FFmpeg fallback")
+        print("[OCR] FFmpeg not found on PATH — cannot extract frames")
         return 0
 
     fps_filter = f"fps=1/{sample_interval}"
-    output_pattern = str(output_dir / "frame_%05ds.jpg")
+    # Use %05d numbering; we'll rename to timestamp names after
+    output_pattern = str(output_dir / "ffout_%05d.jpg")
 
     cmd = [
         ffmpeg_bin,
         "-i", str(video_path),
         "-vf", fps_filter,
-        "-frame_pts", "1",
         "-q:v", "2",
         "-y",
         output_pattern,
     ]
 
-    print(f"[OCR] FFmpeg fallback: extracting frames with filter '{fps_filter}'...")
+    # Scale timeout with video duration (at least 5 min, up to 30 min)
+    duration = _get_video_duration(video_path)
+    timeout = max(300, min(1800, int(duration / 10)))
+
+    print(f"[OCR] FFmpeg: extracting 1 frame every {sample_interval}s "
+          f"(~{int(duration / sample_interval)} frames, timeout={timeout}s)...")
+
     try:
         proc = subprocess.run(
             cmd,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            timeout=600,  # 10 min timeout for very long videos
+            timeout=timeout,
         )
         if proc.returncode != 0:
             stderr_tail = proc.stderr.decode("utf-8", errors="replace")[-500:]
-            print(f"[OCR] FFmpeg exited with code {proc.returncode}: {stderr_tail}")
+            print(f"[OCR] FFmpeg exited with code {proc.returncode}: ...{stderr_tail}")
     except subprocess.TimeoutExpired:
-        print("[OCR] FFmpeg frame extraction timed out (>600s)")
-        return 0
+        print(f"[OCR] FFmpeg frame extraction timed out (>{timeout}s)")
+        # Still check if any frames were produced before timeout
     except Exception as e:
         print(f"[OCR] FFmpeg frame extraction error: {e}")
         return 0
 
-    # FFmpeg names frames sequentially (frame_00001s.jpg, frame_00002s.jpg, ...)
-    # We need to rename them to match our timestamp convention
-    raw_files = sorted(output_dir.glob("frame_*.jpg"))
+    # Rename sequential output to timestamp-based filenames
+    raw_files = sorted(output_dir.glob("ffout_*.jpg"))
     if not raw_files:
         print("[OCR] FFmpeg produced no output frames")
         return 0
 
-    # Rename to timestamp-based names
     renamed = 0
     for idx, f in enumerate(raw_files):
         timestamp_s = int(idx * sample_interval)
         new_name = f"frame_{timestamp_s:05d}s.jpg"
         new_path = output_dir / new_name
-        if f.name != new_name:
-            try:
-                f.rename(new_path)
-            except Exception:
-                pass  # Keep original name if rename fails
+        try:
+            f.rename(new_path)
+        except Exception:
+            pass
         renamed += 1
 
     print(f"[OCR] FFmpeg extracted {renamed} frames successfully")
     return renamed
 
 
-def extract_all_video_frames(video_path, output_dir, sample_interval=SAMPLE_INTERVAL):
+def extract_all_video_frames(video_path, output_dir, sample_interval=None):
     """
-    Extract frames from the ENTIRE video at regular intervals.
+    Extract frames from a video at regular intervals.
+    
     Strategy:
-      1. Try OpenCV (fast, but fails on AV1/VP9 codecs)
-      2. If OpenCV gets 0 frames, fall back to FFmpeg subprocess
+      - Auto-compute sample interval based on video duration
+      - For long videos (>30 min): use FFmpeg directly (OpenCV seeking is too slow)
+      - For short videos: try OpenCV first, fall back to FFmpeg
     
     Args:
         video_path: Path to the video file
         output_dir: Directory to save extracted frames
-        sample_interval: Seconds between frame captures (default 5.0)
+        sample_interval: Override seconds between captures (auto if None)
     
     Returns:
         Number of frames extracted
     """
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
+
+    # Get duration to make smart decisions
+    duration = _get_video_duration(video_path)
     
+    # Auto-compute adaptive interval
+    if sample_interval is None:
+        sample_interval = _get_adaptive_interval(duration)
+    
+    estimated_frames = int(duration / sample_interval) if duration > 0 else 0
+    print(f"[OCR] Video duration: {duration:.0f}s ({duration/3600:.1f}h), "
+          f"interval: {sample_interval}s, estimated frames: {estimated_frames}")
+
+    # For long videos, go straight to FFmpeg — OpenCV seeking is unreliable/slow
+    if duration > FFMPEG_THRESHOLD_SECONDS:
+        print(f"[OCR] Long video (>{FFMPEG_THRESHOLD_SECONDS}s) — using FFmpeg directly "
+              f"(OpenCV frame-seeking is too slow for large files)")
+        return _extract_frames_ffmpeg(video_path, output_dir, sample_interval)
+
+    # For shorter videos, try OpenCV first
     cap = cv2.VideoCapture(str(video_path))
     if not cap.isOpened():
-        print(f"[OCR] OpenCV could not open video — trying FFmpeg fallback")
+        print(f"[OCR] OpenCV could not open video — trying FFmpeg")
         return _extract_frames_ffmpeg(video_path, output_dir, sample_interval)
     
     fps = cap.get(cv2.CAP_PROP_FPS)
@@ -113,13 +187,12 @@ def extract_all_video_frames(video_path, output_dir, sample_interval=SAMPLE_INTE
     if fps <= 0:
         fps = 24.0
     
-    duration = total_frames / fps
     frame_interval = int(fps * sample_interval)
     if frame_interval < 1:
         frame_interval = 1
     
-    print(f"[OCR] Video: {duration:.1f}s, {fps:.1f}fps, {total_frames} total frames")
-    print(f"[OCR] Sampling 1 frame every {sample_interval}s ({total_frames // frame_interval} frames to process)")
+    print(f"[OCR] OpenCV: {total_frames} frames at {fps:.1f}fps, "
+          f"sampling every {frame_interval} frames")
     
     current_frame = 0
     saved_count = 0
@@ -128,12 +201,9 @@ def extract_all_video_frames(video_path, output_dir, sample_interval=SAMPLE_INTE
         cap.set(cv2.CAP_PROP_POS_FRAMES, current_frame)
         ret, frame = cap.read()
         if not ret:
-            # If we haven't saved any frames yet and OpenCV can't read,
-            # this is likely a codec issue — break early to try FFmpeg
             if saved_count == 0:
-                print(f"[OCR] OpenCV failed to read first frame (likely unsupported codec: AV1/VP9)")
+                print(f"[OCR] OpenCV failed to read first frame — falling back to FFmpeg")
                 break
-            # Otherwise, we've just reached the end of the video
             break
         
         timestamp_s = current_frame / fps
@@ -146,12 +216,10 @@ def extract_all_video_frames(video_path, output_dir, sample_interval=SAMPLE_INTE
     
     cap.release()
     
-    # If OpenCV extracted 0 frames, fall back to FFmpeg
     if saved_count == 0:
-        print(f"[OCR] OpenCV extracted 0 frames — falling back to FFmpeg")
         return _extract_frames_ffmpeg(video_path, output_dir, sample_interval)
     
-    print(f"[OCR] Extracted {saved_count} frames from video ({duration:.1f}s)")
+    print(f"[OCR] Extracted {saved_count} frames via OpenCV ({duration:.1f}s video)")
     return saved_count
 
 

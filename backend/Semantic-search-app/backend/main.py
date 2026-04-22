@@ -965,6 +965,7 @@ def upload_via_url(payload: UploadUrlRequest):
         'writeautomaticsub': True,
         'subtitleslangs': ['en'],
         'convertsubtitles': 'srt',
+        'ignoreerrors': 'only_download',  # Don't abort if subtitle download fails (e.g. HTTP 429)
         'socket_timeout': 30,
         'retries': 3,
         'fragment_retries': 3,

@@ -30,6 +30,7 @@ def ingest_video(video_url, query, headers):
     video URL is only downloaded & processed ONCE, then all subsequent
     queries on the same video reuse the cached job_id.
 
+    Retries on transient errors (502, 503, 504, connection resets).
     Returns (job_id, latency_seconds) or (None, 0) on failure.
     """
     # ── Cache hit → skip ingestion entirely
@@ -41,48 +42,70 @@ def ingest_video(video_url, query, headers):
     # ── Use a proper UUID for user_id (Supabase expects uuid type)
     eval_user_id = str(uuid.uuid5(uuid.NAMESPACE_DNS, "neuroclip.eval.bot"))
 
-    t0 = time.time()
-    try:
-        ingest_resp = requests.post(
-            f"{KAGGLE_BACKEND_URL}/upload-via-url",
-            json={"url": video_url, "query": query, "user_id": eval_user_id},
-            headers=headers,
-            timeout=900,  # 15 min — enough for long video download + OCR + transcription
-        )
-        ingest_resp.raise_for_status()
-        job_data = ingest_resp.json()
-        job_id = job_data.get("job_id")
-        latency = time.time() - t0
-        print(f"  -> Ingestion successful in {latency:.1f}s (Job ID: {job_id})")
+    MAX_RETRIES = 3
+    RETRY_DELAYS = [30, 60, 120]  # seconds between retries
 
-        # Cache for future queries on the same video
-        _INGESTION_CACHE[video_url] = job_id
-        return job_id, latency
-
-    except requests.exceptions.ReadTimeout:
-        elapsed = time.time() - t0
-        print(f"  -> Ingestion TIMEOUT after {elapsed:.0f}s. The video is likely still processing on Kaggle.")
-        print(f"     TIP: The backend may finish eventually. Re-run the eval later and the dedup cache will pick it up.")
-        return None, 0.0
-
-    except requests.exceptions.RequestException as e:
-        err_text = ""
+    for attempt in range(MAX_RETRIES):
+        t0 = time.time()
         try:
-            err_text = ingest_resp.text if 'ingest_resp' in dir() and hasattr(ingest_resp, 'text') else str(e)
-        except Exception:
-            err_text = str(e)
-        status_code = getattr(getattr(e, 'response', None), 'status_code', 'Unknown')
+            ingest_resp = requests.post(
+                f"{KAGGLE_BACKEND_URL}/upload-via-url",
+                json={"url": video_url, "query": query, "user_id": eval_user_id},
+                headers=headers,
+                timeout=900,  # 15 min — enough for long video download + OCR + transcription
+            )
+            ingest_resp.raise_for_status()
+            job_data = ingest_resp.json()
+            job_id = job_data.get("job_id")
+            latency = time.time() - t0
+            print(f"  -> Ingestion successful in {latency:.1f}s (Job ID: {job_id})")
 
-        if "ERR_NGROK_3200" in err_text:
-            print(f"  -> FATAL NGROK ERROR: The URL {KAGGLE_BACKEND_URL} is completely OFFLINE (ERR_NGROK_3200).")
-            print(f"     You must restart your Kaggle cell and copy the NEW URL.")
-            sys.exit(1)
-        elif "ngrok.com" in err_text:
-            print(f"  -> FATAL NGROK ERROR: ngrok is intercepting the request (HTTP {status_code}).")
-            sys.exit(1)
-        else:
-            print(f"  -> Ingestion failed: HTTP {status_code} - {str(err_text)[:200]}")
-        return None, 0.0
+            # Cache for future queries on the same video
+            _INGESTION_CACHE[video_url] = job_id
+            return job_id, latency
+
+        except requests.exceptions.ReadTimeout:
+            elapsed = time.time() - t0
+            print(f"  -> Ingestion TIMEOUT after {elapsed:.0f}s. The video is likely still processing on Kaggle.")
+            print(f"     TIP: The backend may finish eventually. Re-run the eval later and the dedup cache will pick it up.")
+            return None, 0.0
+
+        except requests.exceptions.RequestException as e:
+            err_text = ""
+            status_code = "Unknown"
+            try:
+                if hasattr(e, 'response') and e.response is not None:
+                    status_code = e.response.status_code
+                    err_text = e.response.text
+                else:
+                    err_text = str(e)
+            except Exception:
+                err_text = str(e)
+
+            # ── FATAL: Tunnel is completely dead (ngrok restarted / URL expired)
+            if "ERR_NGROK_3200" in str(err_text):
+                print(f"  -> FATAL NGROK ERROR: The URL {KAGGLE_BACKEND_URL} is completely OFFLINE (ERR_NGROK_3200).")
+                print(f"     You must restart your Kaggle cell and copy the NEW URL.")
+                sys.exit(1)
+
+            # ── RETRYABLE: 502/503/504 are transient (backend busy, ngrok gateway timeout)
+            retryable_codes = {502, 503, 504}
+            is_retryable = (
+                (isinstance(status_code, int) and status_code in retryable_codes) or
+                "ConnectionError" in str(type(e).__name__) or
+                "ConnectionReset" in str(err_text)
+            )
+
+            if is_retryable and attempt < MAX_RETRIES - 1:
+                wait = RETRY_DELAYS[attempt]
+                print(f"  -> HTTP {status_code} (transient). Retrying in {wait}s... (attempt {attempt+2}/{MAX_RETRIES})")
+                time.sleep(wait)
+                continue
+            else:
+                print(f"  -> Ingestion failed: HTTP {status_code} - {str(err_text)[:200]}")
+                return None, 0.0
+
+    return None, 0.0
 
 
 def search_clips(job_id, query, headers):

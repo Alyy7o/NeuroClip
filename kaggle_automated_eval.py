@@ -4,7 +4,7 @@ import time
 import os
 import sys
 import json
-import uuid
+import signal
 
 DATASET_CSV = "kaggle_eval_dataset/summarization_eval_pack.csv"
 RESULTS_CSV = "kaggle_eval_dataset/evaluation_results.csv"
@@ -15,6 +15,20 @@ KAGGLE_BACKEND_URL = ""
 # ── Ingestion cache: { video_url → job_id }
 # Prevents re-downloading & re-processing the SAME video for every query.
 _INGESTION_CACHE = {}
+
+# ── Graceful shutdown flag ──
+_SHUTDOWN = False
+
+def _handle_sigint(sig, frame):
+    global _SHUTDOWN
+    if _SHUTDOWN:
+        print("\n  Force exit.")
+        sys.exit(1)
+    _SHUTDOWN = True
+    print("\n\n  ⚠ Ctrl+C detected — finishing current operation then saving results...")
+    print("    (Press Ctrl+C again to force-quit)\n")
+
+signal.signal(signal.SIGINT, _handle_sigint)
 
 
 def calculate_iou(pred_start, pred_end, gt_start, gt_end):
@@ -30,27 +44,38 @@ def ingest_video(video_url, query, headers):
     video URL is only downloaded & processed ONCE, then all subsequent
     queries on the same video reuse the cached job_id.
 
-    Retries on transient errors (502, 503, 504, connection resets).
+    Key design decisions:
+    - NO user_id is sent (avoids FK constraint errors on Supabase — eval doesn't need user tracking)
+    - Only 1 retry on 503 (retries cause duplicate processing on the backend)
+    - 500 errors are NOT retried (they indicate permanent failures like unavailable videos)
+
     Returns (job_id, latency_seconds) or (None, 0) on failure.
     """
+    global _SHUTDOWN
+
     # ── Cache hit → skip ingestion entirely
     if video_url in _INGESTION_CACHE:
         cached_job = _INGESTION_CACHE[video_url]
         print(f"  -> Cached ingestion (job {cached_job[:8]}...)")
         return cached_job, 0.0
 
-    # ── Use a proper UUID for user_id (Supabase expects uuid type)
-    eval_user_id = str(uuid.uuid5(uuid.NAMESPACE_DNS, "neuroclip.eval.bot"))
+    if _SHUTDOWN:
+        return None, 0.0
 
-    MAX_RETRIES = 3
-    RETRY_DELAYS = [30, 60, 120]  # seconds between retries
+    # ── DO NOT send user_id — it causes FK violations on Supabase
+    #    and is not needed for evaluation (processing_history is optional).
+    MAX_RETRIES = 2
+    RETRY_DELAYS = [60, 120]  # seconds between retries
 
     for attempt in range(MAX_RETRIES):
+        if _SHUTDOWN:
+            return None, 0.0
+
         t0 = time.time()
         try:
             ingest_resp = requests.post(
                 f"{KAGGLE_BACKEND_URL}/upload-via-url",
-                json={"url": video_url, "query": query, "user_id": eval_user_id},
+                json={"url": video_url, "query": query},
                 headers=headers,
                 timeout=900,  # 15 min — enough for long video download + OCR + transcription
             )
@@ -88,6 +113,12 @@ def ingest_video(video_url, query, headers):
                 print(f"     You must restart your Kaggle cell and copy the NEW URL.")
                 sys.exit(1)
 
+            # ── PERMANENT: 500 errors (video unavailable, yt-dlp crash) should NOT be retried
+            #    Retrying just triggers another identical download+process cycle on the backend.
+            if isinstance(status_code, int) and status_code == 500:
+                print(f"  -> Ingestion PERMANENT failure (HTTP 500): {str(err_text)[:200]}")
+                return None, 0.0
+
             # ── RETRYABLE: 502/503/504 are transient (backend busy, ngrok gateway timeout)
             retryable_codes = {502, 503, 504}
             is_retryable = (
@@ -99,7 +130,11 @@ def ingest_video(video_url, query, headers):
             if is_retryable and attempt < MAX_RETRIES - 1:
                 wait = RETRY_DELAYS[attempt]
                 print(f"  -> HTTP {status_code} (transient). Retrying in {wait}s... (attempt {attempt+2}/{MAX_RETRIES})")
-                time.sleep(wait)
+                # Interruptible sleep
+                for _ in range(wait):
+                    if _SHUTDOWN:
+                        return None, 0.0
+                    time.sleep(1)
                 continue
             else:
                 print(f"  -> Ingestion failed: HTTP {status_code} - {str(err_text)[:200]}")
@@ -136,7 +171,65 @@ def search_clips(job_id, query, headers):
         return None, 0.0
 
 
+def _save_results(results, unique_videos):
+    """Save collected results to CSV and print summary. Safe to call at any point."""
+    if not results:
+        print("  No results were collected. All queries failed or were skipped.")
+        return
+
+    fieldnames = [
+        "id", "domain", "difficulty", "query_latency", "iou", "relevant",
+        "pred_start", "pred_end", "gt_start", "gt_end", "num_clips",
+        "llm_summary", "topic_explanation"
+    ]
+    with open(RESULTS_CSV, "w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(results)
+
+    # ── Print comprehensive summary
+    total = len(results)
+    total_relevant = sum(r["relevant"] for r in results)
+    avg_iou = sum(r["iou"] for r in results) / total
+    avg_query_lat = sum(r["query_latency"] for r in results) / total
+    has_summary = sum(1 for r in results if r["topic_explanation"])
+
+    # Per-domain breakdown
+    domains = sorted(set(r["domain"] for r in results))
+    # Per-difficulty breakdown
+    difficulties = ["Easy", "Medium", "Hard"]
+
+    print("\n" + "=" * 60)
+    print("    FINAL EVALUATION SUMMARY")
+    print("=" * 60)
+    print(f"  Total Queries Evaluated:     {total}")
+    print(f"  Precision@1 (IoU > 0.3):     {(total_relevant/total)*100:.1f}%")
+    print(f"  Average Temporal IoU:         {avg_iou:.3f}")
+    print(f"  Average Query Latency:        {avg_query_lat:.2f}s")
+    print(f"  Queries with Summarization:   {has_summary}/{total}")
+    print(f"  Videos Ingested (unique):     {len(_INGESTION_CACHE)}/{len(unique_videos)}")
+
+    print(f"\n  --- Per-Domain Precision@1 ---")
+    for domain in domains:
+        domain_results = [r for r in results if r["domain"] == domain]
+        domain_rel = sum(r["relevant"] for r in domain_results)
+        domain_iou = sum(r["iou"] for r in domain_results) / len(domain_results)
+        print(f"    {domain:25s}  {domain_rel}/{len(domain_results)} ({domain_rel/len(domain_results)*100:.0f}%)  avg IoU: {domain_iou:.3f}")
+
+    print(f"\n  --- Per-Difficulty Precision@1 ---")
+    for diff in difficulties:
+        diff_results = [r for r in results if r["difficulty"] == diff]
+        if diff_results:
+            diff_rel = sum(r["relevant"] for r in diff_results)
+            diff_iou = sum(r["iou"] for r in diff_results) / len(diff_results)
+            print(f"    {diff:10s}  {diff_rel}/{len(diff_results)} ({diff_rel/len(diff_results)*100:.0f}%)  avg IoU: {diff_iou:.3f}")
+
+    print(f"\n  Results saved to: {RESULTS_CSV}")
+
+
 def run_evaluation():
+    global _SHUTDOWN
+
     print(f"Starting large-scale evaluation against backend: {KAGGLE_BACKEND_URL}")
     print("This will process 50 queries and measure Precision, Latency, Temporal IoU, and Summarization.\n")
 
@@ -161,6 +254,10 @@ def run_evaluation():
     print("PHASE 1: Ingesting unique videos")
     print("=" * 60)
     for i, video_url in enumerate(unique_videos):
+        if _SHUTDOWN:
+            print(f"\n  Shutdown requested — skipping remaining {len(unique_videos) - i} videos.")
+            break
+
         print(f"\n[Video {i+1}/{len(unique_videos)}] {video_url}")
         # Use first query for this video as the ingestion query
         first_query = next(r["query"] for r in rows if r["video_url"] == video_url)
@@ -174,6 +271,10 @@ def run_evaluation():
     print("=" * 60)
 
     for idx, row in enumerate(rows):
+        if _SHUTDOWN:
+            print(f"\n  Shutdown requested — saving {len(results)} results collected so far.")
+            break
+
         query_id = row["id"]
         video_url = row["video_url"]
         query = row["query"]
@@ -228,60 +329,10 @@ def run_evaluation():
 
         print(f"  -> IoU: {best_iou:.2f} | Relevant: {'✓' if is_relevant else '✗'} | Clips: {len(clips)}")
 
-    # ── Save results
+    # ── Save results (always runs, even after Ctrl+C)
     print("\n" + "=" * 60)
     print("Evaluation complete. Saving results...")
-    if results:
-        fieldnames = [
-            "id", "domain", "difficulty", "query_latency", "iou", "relevant",
-            "pred_start", "pred_end", "gt_start", "gt_end", "num_clips",
-            "llm_summary", "topic_explanation"
-        ]
-        with open(RESULTS_CSV, "w", newline="", encoding="utf-8") as f:
-            writer = csv.DictWriter(f, fieldnames=fieldnames)
-            writer.writeheader()
-            writer.writerows(results)
-
-        # ── Print comprehensive summary
-        total = len(results)
-        total_relevant = sum(r["relevant"] for r in results)
-        avg_iou = sum(r["iou"] for r in results) / total
-        avg_query_lat = sum(r["query_latency"] for r in results) / total
-        has_summary = sum(1 for r in results if r["topic_explanation"])
-
-        # Per-domain breakdown
-        domains = sorted(set(r["domain"] for r in results))
-        # Per-difficulty breakdown
-        difficulties = ["Easy", "Medium", "Hard"]
-
-        print("\n" + "=" * 60)
-        print("    FINAL EVALUATION SUMMARY")
-        print("=" * 60)
-        print(f"  Total Queries Evaluated:     {total}")
-        print(f"  Precision@1 (IoU > 0.3):     {(total_relevant/total)*100:.1f}%")
-        print(f"  Average Temporal IoU:         {avg_iou:.3f}")
-        print(f"  Average Query Latency:        {avg_query_lat:.2f}s")
-        print(f"  Queries with Summarization:   {has_summary}/{total}")
-        print(f"  Videos Ingested (unique):     {len(_INGESTION_CACHE)}/{len(unique_videos)}")
-
-        print(f"\n  --- Per-Domain Precision@1 ---")
-        for domain in domains:
-            domain_results = [r for r in results if r["domain"] == domain]
-            domain_rel = sum(r["relevant"] for r in domain_results)
-            domain_iou = sum(r["iou"] for r in domain_results) / len(domain_results)
-            print(f"    {domain:25s}  {domain_rel}/{len(domain_results)} ({domain_rel/len(domain_results)*100:.0f}%)  avg IoU: {domain_iou:.3f}")
-
-        print(f"\n  --- Per-Difficulty Precision@1 ---")
-        for diff in difficulties:
-            diff_results = [r for r in results if r["difficulty"] == diff]
-            if diff_results:
-                diff_rel = sum(r["relevant"] for r in diff_results)
-                diff_iou = sum(r["iou"] for r in diff_results) / len(diff_results)
-                print(f"    {diff:10s}  {diff_rel}/{len(diff_results)} ({diff_rel/len(diff_results)*100:.0f}%)  avg IoU: {diff_iou:.3f}")
-
-        print(f"\n  Results saved to: {RESULTS_CSV}")
-    else:
-        print("  No results were collected. All queries failed or were skipped.")
+    _save_results(results, unique_videos)
 
 
 if __name__ == "__main__":

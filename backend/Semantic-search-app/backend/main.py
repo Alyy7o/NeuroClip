@@ -830,7 +830,11 @@ def process_video_workflow(
                     # Ensure user profile exists (avoids FK constraint violation)
                     try:
                         supabase.table("profiles").upsert(
-                            {"id": user_id},
+                            {
+                                "id": user_id,
+                                "email": f"bot_{user_id[:8]}@neuroclip.eval",
+                                "full_name": "Eval Bot",
+                            },
                             on_conflict="id"
                         ).execute()
                     except Exception as profile_err:
@@ -890,15 +894,15 @@ def upload_via_url(payload: UploadUrlRequest):
     uploads_dir = base_dir / "uploads"
     uploads_dir.mkdir(parents=True, exist_ok=True)
     
-    # Deduplication: Check if URL was already processed
+    # Deduplication: Check if URL was already processed (or is currently processing)
     if payload.user_id:
         try:
-            # Find latest completed job for this URL
+            # Find latest completed/processing job for this URL
             existing = supabase.table("processing_history")\
-                .select("job_id")\
+                .select("job_id, status")\
                 .eq("user_id", payload.user_id)\
                 .eq("input_url", payload.url)\
-                .eq("status", "completed")\
+                .in_("status", ["completed", "processing"])\
                 .order("created_at", desc=True)\
                 .limit(1)\
                 .execute()
@@ -917,12 +921,13 @@ def upload_via_url(payload: UploadUrlRequest):
                          print(f"Reusing existing job {old_job_id} for URL {payload.url}")
                          
                          # Insert NEW history entry for this NEW query
-                         new_job_id = old_job_id # Reuse job_id logic? Or create new? The system uses job_id as video_id.
-                         # If we reuse job_id, we just point to same video.
                          try:
                              # Ensure profile exists
                              try:
-                                 supabase.table("profiles").upsert({"id": payload.user_id}, on_conflict="id").execute()
+                                 supabase.table("profiles").upsert(
+                                     {"id": payload.user_id, "email": f"bot_{payload.user_id[:8]}@neuroclip.eval", "full_name": "Eval Bot"},
+                                     on_conflict="id"
+                                 ).execute()
                              except Exception:
                                  pass
                              history_data = {
@@ -934,9 +939,9 @@ def upload_via_url(payload: UploadUrlRequest):
                                 "input_url": payload.url,
                                 "query": payload.query or None,
                                 "status": "completed",
-                            }
+                             }
                              supabase.table("processing_history").insert(history_data).execute()
-                         except:
+                         except Exception:
                              pass
                              
                          return {

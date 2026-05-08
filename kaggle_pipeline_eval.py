@@ -97,35 +97,52 @@ QUERY_KEYWORDS = {
 def ingest_video(video_url, query, headers):
     global _SHUTDOWN
     if video_url in _INGESTION_CACHE:
-        print(f"  -> Cached (job {_INGESTION_CACHE[video_url][:8]}...)")
+        print(f"  -> Cached (job {_INGESTION_CACHE[video_url][:8]}...)", flush=True)
         return _INGESTION_CACHE[video_url], 0.0
     if _SHUTDOWN: return None, 0.0
-    for attempt in range(2):
-        if _SHUTDOWN: return None, 0.0
-        t0 = time.time()
+
+    import threading
+
+    # Use a thread so we can print progress while waiting
+    result_holder = {"resp": None, "error": None}
+
+    def _do_ingest():
         try:
-            resp = requests.post(f"{BACKEND_URL}/upload-via-url",
+            r = requests.post(f"{BACKEND_URL}/upload-via-url",
                 json={"url": video_url, "query": query}, headers=headers, timeout=900)
-            resp.raise_for_status()
-            job_id = resp.json().get("job_id")
-            lat = time.time() - t0
-            print(f"  -> Ingested in {lat:.1f}s (Job: {job_id})")
-            _INGESTION_CACHE[video_url] = job_id
-            return job_id, lat
-        except requests.exceptions.ReadTimeout:
-            print(f"  -> TIMEOUT after {time.time()-t0:.0f}s")
-            return None, 0.0
-        except requests.exceptions.RequestException as e:
-            err = getattr(getattr(e, 'response', None), 'text', str(e))
-            code = getattr(getattr(e, 'response', None), 'status_code', 0)
-            if "ERR_NGROK_3200" in str(err): sys.exit(1)
-            if code == 500: return None, 0.0
-            if code in (502,503,504) and attempt == 0:
-                print(f"  -> HTTP {code}, retrying in 60s...")
-                time.sleep(60); continue
-            print(f"  -> Failed: HTTP {code}")
-            return None, 0.0
-    return None, 0.0
+            r.raise_for_status()
+            result_holder["resp"] = r
+        except Exception as e:
+            result_holder["error"] = e
+
+    t0 = time.time()
+    thread = threading.Thread(target=_do_ingest, daemon=True)
+    thread.start()
+
+    # Print progress every 30s to keep Kaggle cell alive
+    while thread.is_alive():
+        thread.join(timeout=30)
+        if thread.is_alive():
+            elapsed = time.time() - t0
+            print(f"  .. ingesting ({elapsed:.0f}s elapsed)", flush=True)
+
+    elapsed = time.time() - t0
+
+    if result_holder["error"]:
+        e = result_holder["error"]
+        err = getattr(getattr(e, 'response', None), 'text', str(e))
+        code = getattr(getattr(e, 'response', None), 'status_code', 0)
+        if isinstance(e, requests.exceptions.ReadTimeout):
+            print(f"  -> TIMEOUT after {elapsed:.0f}s", flush=True)
+        else:
+            print(f"  -> Failed: HTTP {code} - {str(err)[:150]}", flush=True)
+        return None, 0.0
+
+    resp = result_holder["resp"]
+    job_id = resp.json().get("job_id")
+    print(f"  -> Ingested in {elapsed:.1f}s (Job: {job_id})", flush=True)
+    _INGESTION_CACHE[video_url] = job_id
+    return job_id, elapsed
 
 def search_clips(job_id, query, headers):
     t0 = time.time()
@@ -355,15 +372,16 @@ def run():
     headers = {"ngrok-skip-browser-warning": "true"}
 
     # Phase 1: Ingest all videos
-    print("\n" + "="*60 + "\nPHASE 1: Ingesting videos\n" + "="*60)
+    print("\n" + "="*60 + "\nPHASE 1: Ingesting videos\n" + "="*60, flush=True)
     for i, url in enumerate(unique_videos):
         if _SHUTDOWN: break
-        print(f"\n[Video {i+1}/{len(unique_videos)}] {url}")
+        print(f"\n[Video {i+1}/{len(unique_videos)}] {url}", flush=True)
         q = next(r["query"] for r in dataset if r["video_url"] == url)
         ingest_video(url, q, headers)
-    try:
-        with open(CACHE_FILE, "w") as f: json.dump(_INGESTION_CACHE, f, indent=2)
-    except: pass
+        # Save cache after EACH video so progress survives cell crashes
+        try:
+            with open(CACHE_FILE, "w") as f: json.dump(_INGESTION_CACHE, f, indent=2)
+        except: pass
 
     # Phase 2: Search all queries
     print("\n" + "="*60 + "\nPHASE 2: Running searches\n" + "="*60)

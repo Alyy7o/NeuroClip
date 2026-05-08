@@ -14,11 +14,12 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 
-# ── Paths ──
-DATASET_CSV = "kaggle_eval_dataset/summarization_eval_pack.csv"
-RESULTS_CSV = "kaggle_eval_dataset/pipeline_eval_results.csv"
-CACHE_FILE  = "kaggle_eval_dataset/ingestion_cache.json"
-OUTPUT_DIR  = "test_results"
+# ── Paths (relative to script location, not cwd) ──
+SCRIPT_DIR  = os.path.dirname(os.path.abspath(__file__))
+DATASET_CSV = os.path.join(SCRIPT_DIR, "kaggle_eval_dataset", "summarization_eval_pack.csv")
+RESULTS_CSV = os.path.join(SCRIPT_DIR, "kaggle_eval_dataset", "pipeline_eval_results.csv")
+CACHE_FILE  = os.path.join(SCRIPT_DIR, "kaggle_eval_dataset", "ingestion_cache.json")
+OUTPUT_DIR  = os.path.join(SCRIPT_DIR, "test_results")
 STEP_CSV    = os.path.join(OUTPUT_DIR, "pipeline_step_results.csv")
 STEP_PNG    = os.path.join(OUTPUT_DIR, "pipeline_step_comparison.png")
 os.makedirs(OUTPUT_DIR, exist_ok=True)

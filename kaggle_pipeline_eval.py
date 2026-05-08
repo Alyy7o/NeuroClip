@@ -4,6 +4,9 @@ NeuroClip Kaggle Per-Step Pipeline Evaluation
 Runs on Kaggle against a live backend. Ingests videos, searches,
 and evaluates each pipeline step with F-Score, Precision, Recall.
 
+Pre-requisites (run in a Kaggle cell BEFORE starting the backend):
+  !pip install -U yt-dlp     # fixes YouTube download errors
+
 Usage:
   python kaggle_pipeline_eval.py <BACKEND_URL>
 """
@@ -144,19 +147,48 @@ def ingest_video(video_url, query, headers):
     _INGESTION_CACHE[video_url] = job_id
     return job_id, elapsed
 
-def search_clips(job_id, query, headers):
-    t0 = time.time()
+def _check_backend_alive():
+    """Quick health check - returns True if backend responds."""
     try:
-        resp = requests.post(f"{BACKEND_URL}/clips/search",
-            json={"job_id": job_id, "query": query, "top_k": 3, "rerank": True},
-            headers=headers, timeout=120)
-        resp.raise_for_status()
-        data = resp.json()
-        print(f"  -> Search OK in {time.time()-t0:.1f}s")
-        return data, time.time() - t0
-    except Exception as e:
-        print(f"  -> Search failed: {e}")
+        r = requests.get(f"{BACKEND_URL}/docs", timeout=5)
+        return r.status_code == 200
+    except:
+        return False
+
+def search_clips(job_id, query, headers):
+    import threading
+    t0 = time.time()
+
+    result_holder = {"resp": None, "error": None}
+
+    def _do_search():
+        try:
+            r = requests.post(f"{BACKEND_URL}/clips/search",
+                json={"job_id": job_id, "query": query, "top_k": 3, "rerank": True},
+                headers=headers, timeout=300)
+            r.raise_for_status()
+            result_holder["resp"] = r
+        except Exception as e:
+            result_holder["error"] = e
+
+    thread = threading.Thread(target=_do_search, daemon=True)
+    thread.start()
+
+    # Keep-alive prints so Kaggle doesn't kill the cell
+    while thread.is_alive():
+        thread.join(timeout=30)
+        if thread.is_alive():
+            print(f"  .. searching ({time.time()-t0:.0f}s elapsed)", flush=True)
+
+    elapsed = time.time() - t0
+
+    if result_holder["error"]:
+        print(f"  -> Search failed ({elapsed:.0f}s): {result_holder['error']}", flush=True)
         return None, 0.0
+
+    data = result_holder["resp"].json()
+    print(f"  -> Search OK in {elapsed:.1f}s", flush=True)
+    return data, elapsed
 
 def calculate_iou(ps, pe, gs, ge):
     inter = max(0, min(pe, ge) - max(ps, gs))
@@ -384,20 +416,42 @@ def run():
         except: pass
 
     # Phase 2: Search all queries
-    print("\n" + "="*60 + "\nPHASE 2: Running searches\n" + "="*60)
+    print("\n" + "="*60 + "\nPHASE 2: Running searches\n" + "="*60, flush=True)
+
+    # Health check before starting searches
+    print("Checking backend health...", flush=True)
+    if not _check_backend_alive():
+        print("WARNING: Backend is NOT responding!")
+        print("  The backend likely crashed during ingestion (OOM or error).")
+        print("  Please restart the backend cell and re-run this cell.")
+        print("  Your ingestion cache is saved - videos won't re-download.")
+        sys.exit(1)
+    else:
+        print("Backend is alive - proceeding with searches\n", flush=True)
+
     results = []
+    consecutive_failures = 0
     for idx, row in enumerate(dataset):
         if _SHUTDOWN: break
         qid, query = row["id"], row["query"]
         gt_s, gt_e = float(row["gt_start"]), float(row["gt_end"])
         job_id = _INGESTION_CACHE.get(row["video_url"])
-        print(f"\n[{qid}] '{query}'")
+        print(f"\n[{qid}] '{query}'", flush=True)
         if not job_id:
-            print("  -> Skipped (no job)")
+            print("  -> Skipped (no job)", flush=True)
             continue
 
         data, qlat = search_clips(job_id, query, headers)
-        if not data: continue
+        if not data:
+            consecutive_failures += 1
+            if consecutive_failures >= 3:
+                # 3 failures in a row = backend is likely dead
+                if not _check_backend_alive():
+                    print("\nBACKEND CRASHED - aborting searches.", flush=True)
+                    print("Restart backend cell and re-run eval.", flush=True)
+                    break
+            continue
+        consecutive_failures = 0  # reset on success
 
         clips = data.get("results", [])
         topic = data.get("topic_explanation", "")

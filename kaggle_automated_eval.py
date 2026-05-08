@@ -8,6 +8,7 @@ import signal
 
 DATASET_CSV = "kaggle_eval_dataset/summarization_eval_pack.csv"
 RESULTS_CSV = "kaggle_eval_dataset/evaluation_results.csv"
+CACHE_FILE = "kaggle_eval_dataset/ingestion_cache.json"
 
 # Global variable to hold the backend URL
 KAGGLE_BACKEND_URL = ""
@@ -38,22 +39,58 @@ def calculate_iou(pred_start, pred_end, gt_start, gt_end):
     return intersection / union if union > 0 else 0
 
 
+def calculate_content_relevance(query, llm_summary, topic_explanation):
+    """
+    Score content relevance (0.0–1.0) based on whether the LLM summary
+    and topic explanation actually address the query. Uses keyword overlap.
+    
+    This metric is INDEPENDENT of timestamps — it measures whether the system
+    found the RIGHT content regardless of where it appears in the video.
+    """
+    if not llm_summary and not topic_explanation:
+        return 0.0
+    
+    # Extract meaningful words from the query (remove stop words)
+    stop_words = {"what", "is", "a", "an", "the", "how", "to", "of", "in", "and", "vs", "versus", "explain", "explained", "definition", "overview", "calculating", "between", "difference"}
+    query_words = set(w.lower() for w in query.split() if w.lower() not in stop_words and len(w) > 2)
+    
+    if not query_words:
+        return 0.5  # Can't evaluate, give neutral score
+    
+    # Check how many query keywords appear in the combined response
+    response_text = f"{llm_summary or ''} {topic_explanation or ''}".lower()
+    
+    matches = sum(1 for w in query_words if w in response_text)
+    coverage = matches / len(query_words)
+    
+    # Bonus: check for specific phrases from the query
+    query_lower = query.lower()
+    # Extract 2-word and 3-word phrases
+    words = query_lower.split()
+    phrase_matches = 0
+    phrase_count = 0
+    for i in range(len(words) - 1):
+        bigram = f"{words[i]} {words[i+1]}"
+        if bigram not in " ".join(stop_words):
+            phrase_count += 1
+            if bigram in response_text:
+                phrase_matches += 1
+    
+    phrase_score = phrase_matches / max(phrase_count, 1)
+    
+    # Weighted combination: 60% word coverage + 40% phrase match
+    score = 0.6 * coverage + 0.4 * phrase_score
+    
+    return round(min(1.0, score), 3)
+
+
 def ingest_video(video_url, query, headers):
     """
     Ingest a video via /upload-via-url. Uses a local cache so each unique
-    video URL is only downloaded & processed ONCE, then all subsequent
-    queries on the same video reuse the cached job_id.
-
-    Key design decisions:
-    - NO user_id is sent (avoids FK constraint errors on Supabase — eval doesn't need user tracking)
-    - Only 1 retry on 503 (retries cause duplicate processing on the backend)
-    - 500 errors are NOT retried (they indicate permanent failures like unavailable videos)
-
-    Returns (job_id, latency_seconds) or (None, 0) on failure.
+    video URL is only downloaded & processed ONCE.
     """
     global _SHUTDOWN
 
-    # ── Cache hit → skip ingestion entirely
     if video_url in _INGESTION_CACHE:
         cached_job = _INGESTION_CACHE[video_url]
         print(f"  -> Cached ingestion (job {cached_job[:8]}...)")
@@ -62,10 +99,8 @@ def ingest_video(video_url, query, headers):
     if _SHUTDOWN:
         return None, 0.0
 
-    # ── DO NOT send user_id — it causes FK violations on Supabase
-    #    and is not needed for evaluation (processing_history is optional).
     MAX_RETRIES = 2
-    RETRY_DELAYS = [60, 120]  # seconds between retries
+    RETRY_DELAYS = [60, 120]
 
     for attempt in range(MAX_RETRIES):
         if _SHUTDOWN:
@@ -77,7 +112,7 @@ def ingest_video(video_url, query, headers):
                 f"{KAGGLE_BACKEND_URL}/upload-via-url",
                 json={"url": video_url, "query": query},
                 headers=headers,
-                timeout=900,  # 15 min — enough for long video download + OCR + transcription
+                timeout=900,
             )
             ingest_resp.raise_for_status()
             job_data = ingest_resp.json()
@@ -85,14 +120,12 @@ def ingest_video(video_url, query, headers):
             latency = time.time() - t0
             print(f"  -> Ingestion successful in {latency:.1f}s (Job ID: {job_id})")
 
-            # Cache for future queries on the same video
             _INGESTION_CACHE[video_url] = job_id
             return job_id, latency
 
         except requests.exceptions.ReadTimeout:
             elapsed = time.time() - t0
-            print(f"  -> Ingestion TIMEOUT after {elapsed:.0f}s. The video is likely still processing on Kaggle.")
-            print(f"     TIP: The backend may finish eventually. Re-run the eval later and the dedup cache will pick it up.")
+            print(f"  -> Ingestion TIMEOUT after {elapsed:.0f}s.")
             return None, 0.0
 
         except requests.exceptions.RequestException as e:
@@ -107,19 +140,14 @@ def ingest_video(video_url, query, headers):
             except Exception:
                 err_text = str(e)
 
-            # ── FATAL: Tunnel is completely dead (ngrok restarted / URL expired)
             if "ERR_NGROK_3200" in str(err_text):
-                print(f"  -> FATAL NGROK ERROR: The URL {KAGGLE_BACKEND_URL} is completely OFFLINE (ERR_NGROK_3200).")
-                print(f"     You must restart your Kaggle cell and copy the NEW URL.")
+                print(f"  -> FATAL NGROK ERROR: URL is OFFLINE.")
                 sys.exit(1)
 
-            # ── PERMANENT: 500 errors (video unavailable, yt-dlp crash) should NOT be retried
-            #    Retrying just triggers another identical download+process cycle on the backend.
             if isinstance(status_code, int) and status_code == 500:
                 print(f"  -> Ingestion PERMANENT failure (HTTP 500): {str(err_text)[:200]}")
                 return None, 0.0
 
-            # ── RETRYABLE: 502/503/504 are transient (backend busy, ngrok gateway timeout)
             retryable_codes = {502, 503, 504}
             is_retryable = (
                 (isinstance(status_code, int) and status_code in retryable_codes) or
@@ -130,7 +158,6 @@ def ingest_video(video_url, query, headers):
             if is_retryable and attempt < MAX_RETRIES - 1:
                 wait = RETRY_DELAYS[attempt]
                 print(f"  -> HTTP {status_code} (transient). Retrying in {wait}s... (attempt {attempt+2}/{MAX_RETRIES})")
-                # Interruptible sleep
                 for _ in range(wait):
                     if _SHUTDOWN:
                         return None, 0.0
@@ -144,10 +171,7 @@ def ingest_video(video_url, query, headers):
 
 
 def search_clips(job_id, query, headers):
-    """
-    Run semantic search against the backend. Returns the full response dict
-    (including results, topic_explanation) or None on failure.
-    """
+    """Run semantic search against the backend."""
     t0 = time.time()
     try:
         search_resp = requests.post(
@@ -159,7 +183,7 @@ def search_clips(job_id, query, headers):
                 "rerank": True,
             },
             headers=headers,
-            timeout=120,  # LLM + clip extraction can be slow
+            timeout=120,
         )
         search_resp.raise_for_status()
         data = search_resp.json()
@@ -172,13 +196,14 @@ def search_clips(job_id, query, headers):
 
 
 def _save_results(results, unique_videos):
-    """Save collected results to CSV and print summary. Safe to call at any point."""
+    """Save collected results to CSV and print comprehensive summary."""
     if not results:
         print("  No results were collected. All queries failed or were skipped.")
         return
 
     fieldnames = [
-        "id", "domain", "difficulty", "query_latency", "iou", "relevant",
+        "id", "domain", "difficulty", "query_latency", 
+        "iou", "relevant_iou", "content_relevance", "relevant_content",
         "pred_start", "pred_end", "gt_start", "gt_end", "num_clips",
         "llm_summary", "topic_explanation"
     ]
@@ -187,42 +212,74 @@ def _save_results(results, unique_videos):
         writer.writeheader()
         writer.writerows(results)
 
-    # ── Print comprehensive summary
+    # ── Compute metrics
     total = len(results)
-    total_relevant = sum(r["relevant"] for r in results)
-    avg_iou = sum(r["iou"] for r in results) / total
+    queries_with_clips = [r for r in results if r["num_clips"] > 0]
+    queries_no_clips = total - len(queries_with_clips)
+    
+    # Temporal IoU metrics (only for queries that returned clips)
+    total_relevant_iou = sum(r["relevant_iou"] for r in results)
+    avg_iou = sum(r["iou"] for r in results) / total if total else 0
+    avg_iou_with_clips = sum(r["iou"] for r in queries_with_clips) / len(queries_with_clips) if queries_with_clips else 0
+    
+    # Content relevance metrics (ALL queries that returned clips)
+    total_relevant_content = sum(r["relevant_content"] for r in results)
+    avg_content_rel = sum(r["content_relevance"] for r in results) / total if total else 0
+    avg_content_rel_with_clips = sum(r["content_relevance"] for r in queries_with_clips) / len(queries_with_clips) if queries_with_clips else 0
+    
+    # Latency
     avg_query_lat = sum(r["query_latency"] for r in results) / total
+    
+    # Summarization coverage
     has_summary = sum(1 for r in results if r["topic_explanation"])
-
-    # Per-domain breakdown
+    
+    # Per-domain and per-difficulty breakdowns
     domains = sorted(set(r["domain"] for r in results))
-    # Per-difficulty breakdown
     difficulties = ["Easy", "Medium", "Hard"]
 
-    print("\n" + "=" * 60)
+    print("\n" + "=" * 70)
     print("    FINAL EVALUATION SUMMARY")
-    print("=" * 60)
-    print(f"  Total Queries Evaluated:     {total}")
-    print(f"  Precision@1 (IoU > 0.3):     {(total_relevant/total)*100:.1f}%")
-    print(f"  Average Temporal IoU:         {avg_iou:.3f}")
-    print(f"  Average Query Latency:        {avg_query_lat:.2f}s")
-    print(f"  Queries with Summarization:   {has_summary}/{total}")
-    print(f"  Videos Ingested (unique):     {len(_INGESTION_CACHE)}/{len(unique_videos)}")
+    print("=" * 70)
+    print(f"  Total Queries Evaluated:        {total}")
+    print(f"  Queries Returning Clips:        {len(queries_with_clips)}/{total} ({len(queries_with_clips)/total*100:.0f}%)")
+    print(f"  Videos Ingested (unique):       {len(_INGESTION_CACHE)}/{len(unique_videos)}")
+    print()
+    print(f"  ── Temporal Precision ──")
+    print(f"  Precision@1 (IoU > 0.3):        {(total_relevant_iou/total)*100:.1f}%")
+    print(f"  Average Temporal IoU (all):      {avg_iou:.3f}")
+    print(f"  Average Temporal IoU (w/ clips): {avg_iou_with_clips:.3f}")
+    print()
+    print(f"  ── Content Relevance ──")
+    print(f"  Content Relevance Rate:         {(total_relevant_content/total)*100:.1f}%")
+    print(f"  Avg Content Score (all):        {avg_content_rel:.3f}")
+    print(f"  Avg Content Score (w/ clips):   {avg_content_rel_with_clips:.3f}")
+    print()
+    print(f"  ── Performance ──")
+    print(f"  Average Query Latency:          {avg_query_lat:.2f}s")
+    print(f"  Summarization Coverage:         {has_summary}/{total} ({has_summary/total*100:.0f}%)")
 
-    print(f"\n  --- Per-Domain Precision@1 ---")
+    print(f"\n  --- Per-Domain Breakdown ---")
+    print(f"  {'Domain':<25} {'IoU P@1':<10} {'Content%':<10} {'Avg IoU':<10} {'Avg CR':<10}")
+    print(f"  {'-'*65}")
     for domain in domains:
-        domain_results = [r for r in results if r["domain"] == domain]
-        domain_rel = sum(r["relevant"] for r in domain_results)
-        domain_iou = sum(r["iou"] for r in domain_results) / len(domain_results)
-        print(f"    {domain:25s}  {domain_rel}/{len(domain_results)} ({domain_rel/len(domain_results)*100:.0f}%)  avg IoU: {domain_iou:.3f}")
+        dr = [r for r in results if r["domain"] == domain]
+        d_iou_rel = sum(r["relevant_iou"] for r in dr)
+        d_cont_rel = sum(r["relevant_content"] for r in dr)
+        d_avg_iou = sum(r["iou"] for r in dr) / len(dr)
+        d_avg_cr = sum(r["content_relevance"] for r in dr) / len(dr)
+        print(f"  {domain:<25} {d_iou_rel}/{len(dr):<7} {d_cont_rel}/{len(dr):<7} {d_avg_iou:<10.3f} {d_avg_cr:<10.3f}")
 
-    print(f"\n  --- Per-Difficulty Precision@1 ---")
+    print(f"\n  --- Per-Difficulty Breakdown ---")
+    print(f"  {'Difficulty':<12} {'IoU P@1':<10} {'Content%':<10} {'Avg IoU':<10} {'Avg CR':<10}")
+    print(f"  {'-'*52}")
     for diff in difficulties:
-        diff_results = [r for r in results if r["difficulty"] == diff]
-        if diff_results:
-            diff_rel = sum(r["relevant"] for r in diff_results)
-            diff_iou = sum(r["iou"] for r in diff_results) / len(diff_results)
-            print(f"    {diff:10s}  {diff_rel}/{len(diff_results)} ({diff_rel/len(diff_results)*100:.0f}%)  avg IoU: {diff_iou:.3f}")
+        dr = [r for r in results if r["difficulty"] == diff]
+        if dr:
+            d_iou_rel = sum(r["relevant_iou"] for r in dr)
+            d_cont_rel = sum(r["relevant_content"] for r in dr)
+            d_avg_iou = sum(r["iou"] for r in dr) / len(dr)
+            d_avg_cr = sum(r["content_relevance"] for r in dr) / len(dr)
+            print(f"  {diff:<12} {d_iou_rel}/{len(dr):<7} {d_cont_rel}/{len(dr):<7} {d_avg_iou:<10.3f} {d_avg_cr:<10.3f}")
 
     print(f"\n  Results saved to: {RESULTS_CSV}")
 
@@ -230,14 +287,24 @@ def _save_results(results, unique_videos):
 def run_evaluation():
     global _SHUTDOWN
 
-    print(f"Starting large-scale evaluation against backend: {KAGGLE_BACKEND_URL}")
-    print("This will process 50 queries and measure Precision, Latency, Temporal IoU, and Summarization.\n")
+    print(f"Starting evaluation against backend: {KAGGLE_BACKEND_URL}")
+    print("Metrics: Temporal IoU, Content Relevance, Query Latency, Summarization Coverage\n")
 
     if not os.path.exists(DATASET_CSV):
         print(f"Error: {DATASET_CSV} not found. Run generate_kaggle_dataset.py first.")
         return
 
-    # ── Pre-scan: find unique videos and group queries per video
+    # Load ingestion cache from calibration step (if available)
+    if os.path.exists(CACHE_FILE):
+        try:
+            with open(CACHE_FILE, "r") as f:
+                cached = json.load(f)
+            _INGESTION_CACHE.update(cached)
+            print(f"Loaded {len(cached)} cached job IDs from {CACHE_FILE}")
+        except Exception:
+            pass
+
+    # Pre-scan dataset
     rows = []
     with open(DATASET_CSV, "r", encoding="utf-8") as file:
         reader = csv.DictReader(file)
@@ -249,23 +316,29 @@ def run_evaluation():
     headers = {"ngrok-skip-browser-warning": "true"}
     results = []
 
-    # ── Phase 1: Pre-ingest all unique videos (one at a time)
+    # ── Phase 1: Pre-ingest all unique videos
     print("=" * 60)
     print("PHASE 1: Ingesting unique videos")
     print("=" * 60)
     for i, video_url in enumerate(unique_videos):
         if _SHUTDOWN:
-            print(f"\n  Shutdown requested — skipping remaining {len(unique_videos) - i} videos.")
+            print(f"\n  Shutdown requested — skipping remaining videos.")
             break
 
         print(f"\n[Video {i+1}/{len(unique_videos)}] {video_url}")
-        # Use first query for this video as the ingestion query
         first_query = next(r["query"] for r in rows if r["video_url"] == video_url)
         job_id, lat = ingest_video(video_url, first_query, headers)
         if not job_id:
             print(f"  -> SKIPPING all queries for this video (ingestion failed)")
 
-    # ── Phase 2: Run all queries against cached jobs
+    # Save updated cache
+    try:
+        with open(CACHE_FILE, "w") as f:
+            json.dump(_INGESTION_CACHE, f, indent=2)
+    except Exception:
+        pass
+
+    # ── Phase 2: Run all queries
     print("\n" + "=" * 60)
     print("PHASE 2: Running semantic search queries")
     print("=" * 60)
@@ -283,13 +356,11 @@ def run_evaluation():
 
         print(f"\n[{query_id}] '{query}'")
 
-        # Get cached job_id
         job_id = _INGESTION_CACHE.get(video_url)
         if not job_id:
             print(f"  -> Skipped (no ingested job for this video)")
             continue
 
-        # Run search
         search_data, query_latency = search_clips(job_id, query, headers)
         if not search_data:
             continue
@@ -309,7 +380,11 @@ def run_evaluation():
             best_iou = calculate_iou(pred_start, pred_end, gt_start, gt_end)
             llm_summary = clips[0].get("llm_summary", "") or ""
 
-        is_relevant = 1 if best_iou > 0.3 else 0
+        is_relevant_iou = 1 if best_iou > 0.3 else 0
+        
+        # Content relevance score
+        content_rel = calculate_content_relevance(query, llm_summary, topic_explanation)
+        is_relevant_content = 1 if content_rel >= 0.5 else 0
 
         results.append({
             "id": query_id,
@@ -317,7 +392,9 @@ def run_evaluation():
             "difficulty": row["difficulty"],
             "query_latency": round(query_latency, 2),
             "iou": round(best_iou, 3),
-            "relevant": is_relevant,
+            "relevant_iou": is_relevant_iou,
+            "content_relevance": content_rel,
+            "relevant_content": is_relevant_content,
             "pred_start": round(pred_start, 1),
             "pred_end": round(pred_end, 1),
             "gt_start": gt_start,
@@ -327,9 +404,10 @@ def run_evaluation():
             "topic_explanation": topic_explanation[:500],
         })
 
-        print(f"  -> IoU: {best_iou:.2f} | Relevant: {'✓' if is_relevant else '✗'} | Clips: {len(clips)}")
+        status = f"IoU: {best_iou:.2f} ({'✓' if is_relevant_iou else '✗'}) | Content: {content_rel:.2f} ({'✓' if is_relevant_content else '✗'}) | Clips: {len(clips)}"
+        print(f"  -> {status}")
 
-    # ── Save results (always runs, even after Ctrl+C)
+    # ── Save results (always runs)
     print("\n" + "=" * 60)
     print("Evaluation complete. Saving results...")
     _save_results(results, unique_videos)
@@ -349,7 +427,6 @@ if __name__ == "__main__":
         print("Error: Backend URL cannot be empty. Testing on local http://127.0.0.1:8000")
         KAGGLE_BACKEND_URL = "http://127.0.0.1:8000"
 
-    # Remove trailing slash if user added it
     if KAGGLE_BACKEND_URL.endswith("/"):
         KAGGLE_BACKEND_URL = KAGGLE_BACKEND_URL[:-1]
 

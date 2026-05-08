@@ -1,0 +1,7 @@
+Sr.No,Pipeline Step,F-Score,Precision,Recall,TP,FP,FN
+1,Transcription (AssemblyAI ASR),70.0,100.0,53.85,7,0,6
+2,Frame Extraction (OpenCV / FFmpeg),47.06,57.14,40.0,4,3,6
+3,EasyOCR (Text Recognition),0.0,0.0,0.0,0,0,13
+4,Vectorization (MiniLM-L6-v2 Embeddings),47.06,57.14,40.0,4,3,6
+5,Semantic Search (Cosine + Sliding Window),70.0,100.0,53.85,7,0,6
+6,LLM Summarization (Groq / Gemini),70.0,100.0,53.85,7,0,6

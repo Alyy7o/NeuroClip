@@ -10,7 +10,7 @@ import yt_dlp
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import assemblyai as aai
 from pathlib import Path
-from typing import Optional
+from typing import List, Optional
 import torch
 from pydantic import BaseModel
 from fastapi import FastAPI, HTTPException, UploadFile, File, Form
@@ -23,7 +23,36 @@ BASE_DIR = Path(__file__).resolve().parent
 REPO_ROOT = BASE_DIR.parents[1]
 
 # --- App Initialization ---
+API_BUILD_ID = "2026-05-blur-v1"
 app = FastAPI()
+
+
+def _agent_debug_log(location: str, message: str, data: dict, hypothesis_id: str) -> None:
+    # #region agent log
+    try:
+        log_path = BASE_DIR.parents[2] / "debug-743c18.log"
+        payload = {
+            "sessionId": "743c18",
+            "timestamp": int(time.time() * 1000),
+            "location": location,
+            "message": message,
+            "data": data,
+            "hypothesisId": hypothesis_id,
+        }
+        with log_path.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(payload) + "\n")
+    except Exception:
+        pass
+    # #endregion
+
+
+def _registered_paths() -> list:
+    paths = []
+    for route in app.routes:
+        p = getattr(route, "path", None)
+        if p:
+            paths.append(p)
+    return sorted(set(paths))
 
 # --- Module Imports with Path Fixes ---
 try:
@@ -478,10 +507,51 @@ async def transcribe_file(
         "srt_path": str(result.get("srt_path")) if result.get("srt_path") else None,
     }
 
+@app.on_event("startup")
+def _startup_route_audit():
+    paths = _registered_paths()
+    has_anonymize = "/anonymize-video" in paths
+    _agent_debug_log(
+        "main.py:startup",
+        "FastAPI routes registered",
+        {
+            "build_id": API_BUILD_ID,
+            "has_anonymize_video": has_anonymize,
+            "route_count": len(paths),
+            "sample_routes": [p for p in paths if "anonym" in p or "compress" in p],
+        },
+        "H1",
+    )
+    if not has_anonymize:
+        print("[startup] WARNING: POST /anonymize-video is NOT registered — blur UI will 404")
+
+
 @app.get("/health")
 def health():
     """Simple health check to verify service is reachable."""
-    return {"status": "ok", "service": "semantic-backend", "port": 8040}
+    blur_loaded = False
+    cuda_available = False
+    paths = _registered_paths()
+    has_anonymize = "/anonymize-video" in paths
+    try:
+        from blur_service import blur_model_loaded
+        blur_loaded = blur_model_loaded()
+    except Exception:
+        pass
+    try:
+        cuda_available = torch.cuda.is_available()
+    except Exception:
+        pass
+    return {
+        "status": "ok",
+        "service": "semantic-backend",
+        "port": 8040,
+        "build_id": API_BUILD_ID,
+        "cuda_available": cuda_available,
+        "blur_model_loaded": blur_loaded,
+        "has_anonymize_endpoint": has_anonymize,
+        "has_compress_endpoint": "/compress-video" in paths,
+    }
 
 @app.get("/search")
 def search(text_desc: str = "", video_desc: str = "", n_records: int = 10, min_distance: float = 0.3):
@@ -2837,6 +2907,150 @@ async def compress_video(
         "encoder":          mode_label,
         "url":              f"/static/{rel_path.as_posix()}",
         "used_original":    used_original,
+    }
+
+
+@app.post("/anonymize-video")
+async def anonymize_video_endpoint(
+    file: UploadFile = File(...),
+    reference_images: List[UploadFile] = File(...),
+    user_id: Optional[str] = Form(None),
+    query: Optional[str] = Form(None),
+    match_threshold: float = Form(0.65),
+    throttle: int = Form(3),
+    grace: int = Form(30),
+    start_sec: Optional[float] = Form(None),
+    end_sec: Optional[float] = Form(None),
+):
+    """
+    Anonymize a video by blurring faces that match person(s) in reference images.
+    Uses YOLOv8 + optional InsightFace on GPU (Kaggle). Query text is stored for history only.
+    """
+    _agent_debug_log(
+        "main.py:anonymize_video_endpoint",
+        "anonymize-video request received",
+        {
+            "build_id": API_BUILD_ID,
+            "video_name": file.filename,
+            "ref_count": len(reference_images),
+        },
+        "H2",
+    )
+    if not reference_images:
+        raise HTTPException(status_code=400, detail="At least one reference image is required")
+
+    try:
+        from blur_service import anonymize_video
+    except ImportError as e:
+        raise HTTPException(
+            status_code=503,
+            detail=f"Blur service unavailable. Install blur dependencies: {e}",
+        )
+
+    uploads_dir = REPO_ROOT / "uploads"
+    uploads_dir.mkdir(parents=True, exist_ok=True)
+    output_dir = REPO_ROOT / "output_data" / "anonymized"
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    safe_name = Path(file.filename or "video.mp4").name
+    job_id = str(uuid.uuid4())
+    input_path = uploads_dir / f"{job_id}_in_{safe_name}"
+    refs_dir = uploads_dir / f"{job_id}_refs"
+    refs_dir.mkdir(parents=True, exist_ok=True)
+    output_path = output_dir / f"{job_id}_anonymized_{safe_name}"
+
+    try:
+        with input_path.open("wb") as out:
+            shutil.copyfileobj(file.file, out)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"File save failed: {e}")
+
+    saved_refs = 0
+    for idx, ref in enumerate(reference_images):
+        ref_name = Path(ref.filename or f"ref_{idx}.jpg").name
+        ref_path = refs_dir / ref_name
+        try:
+            with ref_path.open("wb") as out:
+                shutil.copyfileobj(ref.file, out)
+            saved_refs += 1
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Reference image save failed: {e}")
+
+    if saved_refs == 0:
+        raise HTTPException(status_code=400, detail="No reference images could be saved")
+
+    t0 = time.perf_counter()
+    try:
+        stats = anonymize_video(
+            input_path,
+            refs_dir,
+            output_path,
+            match_threshold=float(match_threshold),
+            throttle=int(throttle),
+            grace=int(grace),
+            start_sec=start_sec,
+            end_sec=end_sec,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        print(f"[anonymize-video] failed: {e}")
+        raise HTTPException(status_code=500, detail=f"Anonymization failed: {e}")
+
+    if not output_path.exists():
+        raise HTTPException(status_code=500, detail="Output video was not created")
+
+    duration = time.perf_counter() - t0
+    rel_path = output_path.relative_to(REPO_ROOT / "output_data")
+    static_url = f"/static/{rel_path.as_posix()}"
+    query_note = (query or "").strip()
+
+    if supabase is not None and user_id:
+        try:
+            supabase.table("profiles").upsert({"id": user_id}, on_conflict="id").execute()
+        except Exception:
+            pass
+        try:
+            history_query = query_note or (
+                f"ref_images={saved_refs} threshold={match_threshold} "
+                f"throttle={throttle} grace={grace}"
+            )
+            supabase.table("processing_history").insert({
+                "user_id": user_id,
+                "module": "blurring",
+                "input_type": "file",
+                "input_url": safe_name,
+                "query": history_query,
+                "result_url": static_url,
+                "status": "completed",
+            }).execute()
+            supabase.table("user_videos").upsert({
+                "id": job_id,
+                "user_id": user_id,
+                "title": f"Anonymized: {safe_name}",
+                "original_filename": safe_name,
+                "video_url": static_url,
+                "file_size": int(output_path.stat().st_size),
+                "duration": float(stats.get("total_frames", 0)) / max(float(stats.get("fps", 25)), 1),
+                "status": "completed",
+                "metadata": {
+                    "module": "blurring",
+                    "target_ids_blurred": stats.get("target_ids_blurred"),
+                    "processing_time_sec": stats.get("processing_time_sec"),
+                    "query": query_note,
+                },
+            }).execute()
+        except Exception as e:
+            print("Supabase persistence failed for blurring job:", e)
+
+    return {
+        "job_id": job_id,
+        "url": static_url,
+        "target_ids_blurred": int(stats.get("target_ids_blurred", 0)),
+        "total_frames": int(stats.get("total_frames", 0)),
+        "processing_time_sec": float(stats.get("processing_time_sec", duration)),
+        "query_received": query_note,
+        "reference_images_count": saved_refs,
     }
 
 

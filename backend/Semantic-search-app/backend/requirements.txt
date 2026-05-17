@@ -29,6 +29,9 @@ opencv-python-headless
 Pillow
 moviepy
 
+# Blurring (also install requirements-blur.txt on GPU / Kaggle)
+# ultralytics>=8.0.0
+
 # OCR and Specific Tools
 easyocr
 pyngrok

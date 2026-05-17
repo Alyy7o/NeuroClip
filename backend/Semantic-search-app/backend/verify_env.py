@@ -22,6 +22,13 @@ OPTIONAL = {
     "VITE_SUPABASE_ANON_KEY":  "Supabase anon key (for frontend)",
 }
 
+BLUR_OPTIONAL = {
+    "BLUR_YOLO_WEIGHTS":       "Path to yolov8 .pt (default: auto-download yolov8n.pt)",
+    "BLUR_FACE_WEIGHTS":       "Optional dedicated face detector .pt",
+    "BLUR_DEVICE":             "cuda:0 or cpu (default: auto)",
+    "BLUR_TRACKER":            "Ultralytics tracker yaml (default: botsort.yaml)",
+}
+
 print("=" * 60)
 print("  NeuroClip Environment Verification")
 print("=" * 60)
@@ -60,8 +67,42 @@ for key in list(REQUIRED.keys()) + list(OPTIONAL.keys()):
     else:
         print(f"    ✗  {key}  — NOT SET")
 
-# ── 3. .env files ─────────────────────────────────────────────
-print("\n[3] .env files found on disk:")
+# ── 3. Blur / GPU ─────────────────────────────────────────────
+print("\n[3] Blur module & GPU:")
+try:
+    import torch
+    cuda = torch.cuda.is_available()
+    print(f"    torch.cuda.is_available() = {cuda}")
+    if cuda:
+        print(f"    GPU: {torch.cuda.get_device_name(0)}")
+except Exception as e:
+    print(f"    torch not available: {e}")
+
+for key, hint in BLUR_OPTIONAL.items():
+    val = os.getenv(key, "")
+    if val:
+        print(f"    ✓  {key} = {val}")
+    else:
+        print(f"    ·  {key}  — not set ({hint})")
+
+blur_weights = os.getenv(
+    "BLUR_YOLO_WEIGHTS",
+    "/kaggle/input/neuroclip-blur-weights/yolov8n.pt",
+)
+from pathlib import Path
+if Path(blur_weights).exists():
+    print(f"    ✓  BLUR weights file exists: {blur_weights}")
+else:
+    print(f"    ·  BLUR weights not at {blur_weights} (ultralytics will try yolov8n.pt)")
+
+try:
+    from ultralytics import YOLO  # noqa: F401
+    print("    ✓  ultralytics import OK")
+except ImportError:
+    print("    ✗  ultralytics not installed — run: pip install -r requirements-blur.txt")
+
+# ── 4. .env files ─────────────────────────────────────────────
+print("\n[4] .env files found on disk:")
 from pathlib import Path
 candidates = [
     Path("/kaggle/working/NeuroClip/backend/Semantic-search-app/.env"),
@@ -73,7 +114,6 @@ for p in candidates:
     if p.exists():
         found_any = True
         print(f"    ✓  {p}  ({p.stat().st_size} bytes)")
-        # Show which keys are in it
         for line in p.read_text(errors="replace").splitlines():
             s = line.strip()
             if s and not s.startswith("#") and "=" in s:
@@ -82,7 +122,7 @@ for p in candidates:
     else:
         print(f"    ✗  {p}  — not found")
 
-# ── 4. Verdict ────────────────────────────────────────────────
+# ── 5. Verdict ────────────────────────────────────────────────
 print("\n" + "=" * 60)
 missing = [k for k in REQUIRED if not os.environ.get(k)]
 if missing:

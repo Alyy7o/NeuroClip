@@ -28,6 +28,7 @@ export function VideoPlayer({ videoUrl, autoPlay = false }: VideoPlayerProps) {
   // For non-YouTube and non-blob URLs, fetch with ngrok header and convert to blob
   const [blobUrl, setBlobUrl] = useState<string | null>(null);
   const [loadError, setLoadError] = useState(false);
+  const [videoError, setVideoError] = useState(false);
 
   useEffect(() => {
     // Skip blob fetching for YouTube, blob:, or data: URLs
@@ -37,6 +38,8 @@ export function VideoPlayer({ videoUrl, autoPlay = false }: VideoPlayerProps) {
     }
 
     let cancelled = false;
+    setVideoError(false);
+    setLoadError(false);
     const fetchVideo = async () => {
       try {
         const resp = await fetch(videoUrl, {
@@ -47,11 +50,13 @@ export function VideoPlayer({ videoUrl, autoPlay = false }: VideoPlayerProps) {
         if (!cancelled) {
           const url = URL.createObjectURL(blob);
           setBlobUrl(url);
+          // #region agent log
+          fetch('http://127.0.0.1:7349/ingest/b5b03500-6997-4666-8a59-a196e0f10b38',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'743c18'},body:JSON.stringify({sessionId:'743c18',location:'VideoPlayer.tsx:fetch',message:'video blob loaded',data:{bytes:blob.size,type:blob.type},timestamp:Date.now(),hypothesisId:'H1'})}).catch(()=>{});
+          // #endregion
         }
       } catch (err) {
         console.error('[VideoPlayer] Failed to fetch video:', err);
         if (!cancelled) {
-          // Fallback: try the raw URL directly (works for local dev without ngrok)
           setBlobUrl(videoUrl);
           setLoadError(true);
         }
@@ -221,15 +226,28 @@ export function VideoPlayer({ videoUrl, autoPlay = false }: VideoPlayerProps) {
       tabIndex={0}
       style={{ outline: 'none' }}
     >
-      {blobUrl ? (
+      {blobUrl && !videoError ? (
         <video
           ref={videoRef}
           src={blobUrl}
+          type="video/mp4"
           onTimeUpdate={handleTimeUpdate}
           onLoadedMetadata={handleLoadedMetadata}
+          onError={() => {
+            setVideoError(true);
+            // #region agent log
+            fetch('http://127.0.0.1:7349/ingest/b5b03500-6997-4666-8a59-a196e0f10b38',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'743c18'},body:JSON.stringify({sessionId:'743c18',location:'VideoPlayer.tsx:onError',message:'video element error',data:{videoUrl:videoUrl.slice(0,80)},timestamp:Date.now(),hypothesisId:'H1'})}).catch(()=>{});
+            // #endregion
+          }}
           className="w-full aspect-video object-contain"
           onClick={togglePlayPause}
+          playsInline
+          controls={false}
         />
+      ) : videoError ? (
+        <motion.div className="w-full aspect-video flex flex-col items-center justify-center gap-2 bg-black/80 p-4">
+          <p className="text-sm text-white/80 text-center">Preview unavailable (codec). Use Download to view the file.</p>
+        </motion.div>
       ) : (
         <div className="w-full aspect-video flex items-center justify-center bg-black/80">
           <div className="flex flex-col items-center gap-2">

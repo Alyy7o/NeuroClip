@@ -55,7 +55,6 @@ export default function Blurring() {
     explanation: string;
     duration: number;
     targetIdsBlurred: number;
-    totalFrames: number;
     processingTimeSec: number;
     downloadPath: string;
   } | null>(null);
@@ -88,17 +87,10 @@ export default function Blurring() {
     let historyId: string | null = null;
 
     try {
-      // #region agent log
-      fetch('http://127.0.0.1:7349/ingest/b5b03500-6997-4666-8a59-a196e0f10b38',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'743c18'},body:JSON.stringify({sessionId:'743c18',location:'Blurring.tsx:handleProcess',message:'blur process start',data:{apiBase:API_BASE,refCount:referenceImages.length},timestamp:Date.now(),hypothesisId:'H3'})}).catch(()=>{});
-      // #endregion
-
       const healthResp = await fetch(`${API_BASE}/health`, {
         headers: { 'ngrok-skip-browser-warning': 'true' },
       });
       const healthData = healthResp.ok ? await healthResp.json() : {};
-      // #region agent log
-      fetch('http://127.0.0.1:7349/ingest/b5b03500-6997-4666-8a59-a196e0f10b38',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'743c18'},body:JSON.stringify({sessionId:'743c18',location:'Blurring.tsx:health',message:'health check',data:{ok:healthResp.ok,buildId:healthData.build_id,hasAnonymize:healthData.has_anonymize_endpoint},timestamp:Date.now(),hypothesisId:'H1'})}).catch(()=>{});
-      // #endregion
       if (healthResp.ok && healthData.has_anonymize_endpoint !== true) {
         throw new Error(
           'Blur API is not available on this server (outdated backend). ' +
@@ -150,9 +142,10 @@ export default function Blurring() {
       if (query.trim()) formData.append('query', queryWithTime);
       if (timeRange.start > 0) formData.append('start_sec', String(timeRange.start));
       if (timeRange.end > 0) formData.append('end_sec', String(timeRange.end));
-      formData.append('match_threshold', '0.65');
+      formData.append('match_threshold', '0.78');
       formData.append('throttle', '3');
       formData.append('grace', '30');
+      formData.append('min_match_streak', '2');
 
       const xhr = new XMLHttpRequest();
       const uploadPromise = new Promise<Record<string, unknown>>((resolve, reject) => {
@@ -165,9 +158,6 @@ export default function Blurring() {
         });
 
         xhr.onload = () => {
-          // #region agent log
-          fetch('http://127.0.0.1:7349/ingest/b5b03500-6997-4666-8a59-a196e0f10b38',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'743c18'},body:JSON.stringify({sessionId:'743c18',location:'Blurring.tsx:xhr.onload',message:'anonymize response',data:{status:xhr.status,url:`${API_BASE}/anonymize-video`},timestamp:Date.now(),hypothesisId:'H4'})}).catch(()=>{});
-          // #endregion
           if (xhr.status >= 200 && xhr.status < 300) {
             resolve(JSON.parse(xhr.responseText));
           } else if (xhr.status === 404) {
@@ -204,12 +194,12 @@ export default function Blurring() {
       clearInterval(stepInterval);
       setCurrentStep(blurringSteps.length - 1);
 
-      const processedVideoUrl = `${API_BASE}${data.url as string}`;
-      const targetIds = Number(data.target_ids_blurred ?? 0);
-      const totalFrames = Number(data.total_frames ?? 0);
-      const procTime = Number(data.processing_time_sec ?? 0);
       const relUrl = data.url as string;
       const downloadPath = relUrl.replace(/^\/static\//, '');
+      const playbackUrl = `${API_BASE}/serve-clip?path=${encodeURIComponent(downloadPath)}`;
+      const targetIds = Number(data.target_ids_blurred ?? 0);
+      const procTime = Number(data.processing_time_sec ?? 0);
+      const videoDurationSec = Number(data.video_duration_sec ?? 0);
 
       if (historyId && user?.id) {
         await supabase
@@ -222,22 +212,13 @@ export default function Blurring() {
       }
 
       setResult({
-        processedVideoUrl,
+        processedVideoUrl: playbackUrl,
         targetIdsBlurred: targetIds,
-        totalFrames,
         processingTimeSec: procTime,
         downloadPath,
-        duration: timeRange.end > timeRange.start ? timeRange.end - timeRange.start : timeRange.end,
-        explanation: `Your video has been anonymized using ${referenceImages.length} reference image(s).
-
-**Processing details:**
-- Track targets locked: ${targetIds}
-- Frames processed: ${totalFrames}
-- Server processing time: ${procTime.toFixed(1)}s
-- Match threshold: 0.65
-
-Faces matching the reference person(s) were blurred; other faces were left unchanged.${
-          query.trim() ? `\n\nNotes: ${query.trim()}` : ''
+        duration: videoDurationSec || (timeRange.end > timeRange.start ? timeRange.end - timeRange.start : timeRange.end),
+        explanation: `Anonymized ${referenceImages.length} reference photo(s) · ${targetIds} person(s) blurred · ${procTime.toFixed(0)}s processing.${
+          query.trim() ? ` Notes: ${query.trim()}` : ''
         }`,
       });
 

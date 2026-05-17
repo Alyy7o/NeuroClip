@@ -27,25 +27,6 @@ API_BUILD_ID = "2026-05-blur-v1"
 app = FastAPI()
 
 
-def _agent_debug_log(location: str, message: str, data: dict, hypothesis_id: str) -> None:
-    # #region agent log
-    try:
-        log_path = BASE_DIR.parents[2] / "debug-743c18.log"
-        payload = {
-            "sessionId": "743c18",
-            "timestamp": int(time.time() * 1000),
-            "location": location,
-            "message": message,
-            "data": data,
-            "hypothesisId": hypothesis_id,
-        }
-        with log_path.open("a", encoding="utf-8") as f:
-            f.write(json.dumps(payload) + "\n")
-    except Exception:
-        pass
-    # #endregion
-
-
 def _registered_paths() -> list:
     paths = []
     for route in app.routes:
@@ -509,19 +490,7 @@ async def transcribe_file(
 
 @app.on_event("startup")
 def _startup_route_audit():
-    paths = _registered_paths()
-    has_anonymize = "/anonymize-video" in paths
-    _agent_debug_log(
-        "main.py:startup",
-        "FastAPI routes registered",
-        {
-            "build_id": API_BUILD_ID,
-            "has_anonymize_video": has_anonymize,
-            "route_count": len(paths),
-            "sample_routes": [p for p in paths if "anonym" in p or "compress" in p],
-        },
-        "H1",
-    )
+    has_anonymize = "/anonymize-video" in _registered_paths()
     if not has_anonymize:
         print("[startup] WARNING: POST /anonymize-video is NOT registered — blur UI will 404")
 
@@ -2916,9 +2885,10 @@ async def anonymize_video_endpoint(
     reference_images: List[UploadFile] = File(...),
     user_id: Optional[str] = Form(None),
     query: Optional[str] = Form(None),
-    match_threshold: float = Form(0.65),
+    match_threshold: float = Form(0.78),
     throttle: int = Form(3),
     grace: int = Form(30),
+    min_match_streak: int = Form(2),
     start_sec: Optional[float] = Form(None),
     end_sec: Optional[float] = Form(None),
 ):
@@ -2926,16 +2896,6 @@ async def anonymize_video_endpoint(
     Anonymize a video by blurring faces that match person(s) in reference images.
     Uses YOLOv8 + optional InsightFace on GPU (Kaggle). Query text is stored for history only.
     """
-    _agent_debug_log(
-        "main.py:anonymize_video_endpoint",
-        "anonymize-video request received",
-        {
-            "build_id": API_BUILD_ID,
-            "video_name": file.filename,
-            "ref_count": len(reference_images),
-        },
-        "H2",
-    )
     if not reference_images:
         raise HTTPException(status_code=400, detail="At least one reference image is required")
 
@@ -2988,24 +2948,13 @@ async def anonymize_video_endpoint(
             match_threshold=float(match_threshold),
             throttle=int(throttle),
             grace=int(grace),
+            min_match_streak=int(min_match_streak),
             start_sec=start_sec,
             end_sec=end_sec,
         )
     except ValueError as e:
-        _agent_debug_log(
-            "main.py:anonymize_video_endpoint",
-            "anonymize-video ValueError",
-            {"detail": str(e), "saved_refs": saved_refs},
-            "H5",
-        )
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
-        _agent_debug_log(
-            "main.py:anonymize_video_endpoint",
-            "anonymize-video Exception",
-            {"detail": str(e), "type": type(e).__name__},
-            "H6",
-        )
         print(f"[anonymize-video] failed: {e}")
         raise HTTPException(status_code=500, detail=f"Anonymization failed: {e}")
 
@@ -3063,6 +3012,9 @@ async def anonymize_video_endpoint(
         "processing_time_sec": float(stats.get("processing_time_sec", duration)),
         "query_received": query_note,
         "reference_images_count": saved_refs,
+        "video_duration_sec": stats.get("video_duration_sec"),
+        "match_threshold": stats.get("match_threshold"),
+        "device": stats.get("device"),
     }
 
 

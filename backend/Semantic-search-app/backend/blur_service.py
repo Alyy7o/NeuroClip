@@ -14,6 +14,8 @@ from __future__ import annotations
 
 import logging
 import os
+import shutil
+import subprocess
 import threading
 import time
 from pathlib import Path
@@ -26,6 +28,86 @@ logger = logging.getLogger(__name__)
 
 _PROCESS_LOCK = threading.Lock()
 _ENGINE: Optional["BlurEngine"] = None
+DEFAULT_MATCH_THRESHOLD = float(os.getenv("BLUR_MATCH_THRESHOLD", "0.78"))
+
+
+def _agent_debug_log(location: str, message: str, data: dict, hypothesis_id: str) -> None:
+    # #region agent log
+    try:
+        log_path = Path(__file__).resolve().parents[3] / "debug-743c18.log"
+        import json
+
+        payload = {
+            "sessionId": "743c18",
+            "timestamp": int(time.time() * 1000),
+            "location": location,
+            "message": message,
+            "data": data,
+            "hypothesisId": hypothesis_id,
+        }
+        with log_path.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(payload) + "\n")
+    except Exception:
+        pass
+    # #endregion
+
+
+def _resolve_ffmpeg() -> Optional[str]:
+    ff = shutil.which("ffmpeg")
+    if ff:
+        return ff
+    try:
+        import imageio_ffmpeg
+
+        return imageio_ffmpeg.get_ffmpeg_exe()
+    except Exception:
+        return None
+
+
+def _transcode_for_browser(src: Path, dst: Path) -> bool:
+    """H.264 + AAC for HTML5 playback (OpenCV mp4v is not browser-compatible)."""
+    ff = _resolve_ffmpeg()
+    if not ff or not src.exists():
+        return False
+    cmd = [
+        ff,
+        "-y",
+        "-i",
+        str(src),
+        "-c:v",
+        "libx264",
+        "-preset",
+        "fast",
+        "-crf",
+        "23",
+        "-pix_fmt",
+        "yuv420p",
+        "-c:a",
+        "aac",
+        "-b:a",
+        "128k",
+        "-movflags",
+        "+faststart",
+        str(dst),
+    ]
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+        ok = proc.returncode == 0 and dst.exists() and dst.stat().st_size > 0
+        _agent_debug_log(
+            "blur_service.py:_transcode_for_browser",
+            "ffmpeg transcode",
+            {"ok": ok, "returncode": proc.returncode, "dst_size": dst.stat().st_size if dst.exists() else 0},
+            "H1",
+        )
+        return ok
+    except Exception as exc:
+        _agent_debug_log(
+            "blur_service.py:_transcode_for_browser",
+            "ffmpeg failed",
+            {"error": str(exc)},
+            "H1",
+        )
+        return False
 
 
 def _cosine_similarity(a: np.ndarray, b: np.ndarray) -> float:
@@ -123,7 +205,9 @@ class BlurEngine:
                 name=os.getenv("BLUR_INSIGHTFACE_MODEL", "buffalo_l"),
                 providers=providers,
             )
-            self._insightface.prepare(ctx_id=0 if "cuda" in self._device else -1, det_size=(640, 640))
+            use_cuda = "cuda" in self._device
+            self._insightface.prepare(ctx_id=0 if use_cuda else -1, det_size=(640, 640))
+            logger.info("[blur] InsightFace ctx_id=%s", 0 if use_cuda else -1)
             logger.info("[blur] InsightFace loaded")
         except Exception as exc:
             logger.warning("[blur] InsightFace unavailable (%s); using histogram fallback", exc)
@@ -327,9 +411,10 @@ class BlurEngine:
         output_path: Path,
         master: np.ndarray,
         *,
-        match_threshold: float = 0.65,
+        match_threshold: float = DEFAULT_MATCH_THRESHOLD,
         throttle: int = 3,
         grace: int = 30,
+        min_match_streak: int = 2,
         start_sec: Optional[float] = None,
         end_sec: Optional[float] = None,
     ) -> Dict[str, object]:
@@ -348,20 +433,30 @@ class BlurEngine:
             end_frame = total_frames
 
         output_path.parent.mkdir(parents=True, exist_ok=True)
+        raw_path = output_path.with_name(output_path.stem + "_raw.mp4")
         fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-        writer = cv2.VideoWriter(str(output_path), fourcc, fps, (width, height))
+        writer = cv2.VideoWriter(str(raw_path), fourcc, fps, (width, height))
         if not writer.isOpened():
             cap.release()
-            raise RuntimeError(f"Cannot create output video: {output_path}")
+            raise RuntimeError(f"Cannot create output video: {raw_path}")
 
-        active_tracks: Dict[int, int] = {}  # track_id -> frames since last match
+        active_tracks: Dict[int, int] = {}
+        match_streak: Dict[int, int] = {}
         locked_targets: Set[int] = set()
         frame_idx = 0
         processed = 0
         throttle = max(1, int(throttle))
         grace = max(1, int(grace))
+        min_streak = max(1, int(min_match_streak))
+        use_half = "cuda" in self._device
         master_dim = int(master.shape[0])
-        logger.info("[blur] Video match using master_dim=%d insightface=%s", master_dim, self._insightface is not None)
+        logger.info(
+            "[blur] match_threshold=%.2f min_streak=%d device=%s half=%s",
+            match_threshold,
+            min_streak,
+            self._device,
+            use_half,
+        )
 
         while True:
             ok, frame = cap.read()
@@ -369,16 +464,19 @@ class BlurEngine:
                 break
 
             in_range = start_frame <= frame_idx < end_frame
-            if in_range and frame_idx % throttle == 0:
+            if in_range:
                 results = self._yolo.track(
                     frame,
                     persist=True,
                     verbose=False,
                     device=self._device,
+                    half=use_half,
                     classes=[0],
                     tracker=os.getenv("BLUR_TRACKER", "botsort.yaml"),
                 )
                 current_ids: Set[int] = set()
+                frame_candidates: List[Tuple[int, float]] = []
+
                 for r in results:
                     if r.boxes is None or r.boxes.id is None:
                         continue
@@ -388,54 +486,47 @@ class BlurEngine:
                         current_ids.add(tid)
                         px1, py1, px2, py2 = map(int, box[:4])
                         fx1, fy1, fx2, fy2 = self._person_face_region(frame, px1, py1, px2, py2)
+
+                        if tid in locked_targets:
+                            pad = int(0.08 * max(fx2 - fx1, fy2 - fy1))
+                            _gaussian_blur_roi(
+                                frame, fx1 - pad, fy1 - pad, fx2 + pad, fy2 + pad
+                            )
+                            continue
+
+                        if frame_idx % throttle != 0:
+                            continue
+
                         emb = self._embedding_for_face_region(frame, fx1, fy1, fx2, fy2)
                         if emb is None or emb.shape[0] != master_dim:
+                            match_streak[tid] = 0
                             continue
                         sim = _cosine_similarity(master, emb)
                         if sim >= match_threshold:
-                            locked_targets.add(tid)
-                            active_tracks[tid] = 0
-                        elif tid in locked_targets:
-                            active_tracks[tid] = active_tracks.get(tid, 0) + 1
-                            if active_tracks[tid] > grace:
-                                locked_targets.discard(tid)
-                                active_tracks.pop(tid, None)
+                            frame_candidates.append((tid, sim))
+                        else:
+                            match_streak[tid] = 0
 
-                # Decay tracks not seen this detection frame
+                if frame_idx % throttle == 0 and frame_candidates:
+                    frame_candidates.sort(key=lambda x: x[1], reverse=True)
+                    best_tid, best_sim = frame_candidates[0]
+                    second_sim = frame_candidates[1][1] if len(frame_candidates) > 1 else 0.0
+                    if len(frame_candidates) == 1 or (best_sim - second_sim) >= 0.05:
+                        match_streak[best_tid] = match_streak.get(best_tid, 0) + 1
+                        if match_streak[best_tid] >= min_streak:
+                            locked_targets.add(best_tid)
+                            active_tracks[best_tid] = 0
+                    for tid, _ in frame_candidates[1:]:
+                        if tid != best_tid:
+                            match_streak[tid] = 0
+
                 for tid in list(locked_targets):
                     if tid not in current_ids:
-                        active_tracks[tid] = active_tracks.get(tid, 0) + throttle
+                        active_tracks[tid] = active_tracks.get(tid, 0) + 1
                         if active_tracks[tid] > grace:
                             locked_targets.discard(tid)
                             active_tracks.pop(tid, None)
-
-            if in_range and locked_targets:
-                results = self._yolo.track(
-                    frame,
-                    persist=True,
-                    verbose=False,
-                    device=self._device,
-                    classes=[0],
-                    tracker=os.getenv("BLUR_TRACKER", "botsort.yaml"),
-                )
-                for r in results:
-                    if r.boxes is None or r.boxes.id is None:
-                        continue
-                    ids = r.boxes.id.int().cpu().tolist()
-                    xyxy = r.boxes.xyxy.cpu().numpy()
-                    for tid, box in zip(ids, xyxy):
-                        if tid not in locked_targets:
-                            continue
-                        px1, py1, px2, py2 = map(int, box[:4])
-                        fx1, fy1, fx2, fy2 = self._person_face_region(frame, px1, py1, px2, py2)
-                        pad = int(0.08 * max(fx2 - fx1, fy2 - fy1))
-                        _gaussian_blur_roi(
-                            frame,
-                            fx1 - pad,
-                            fy1 - pad,
-                            fx2 + pad,
-                            fy2 + pad,
-                        )
+                            match_streak.pop(tid, None)
 
             writer.write(frame)
             frame_idx += 1
@@ -445,12 +536,28 @@ class BlurEngine:
         cap.release()
         writer.release()
 
+        final_path = output_path
+        if _transcode_for_browser(raw_path, output_path):
+            try:
+                raw_path.unlink(missing_ok=True)
+            except Exception:
+                pass
+        else:
+            logger.warning("[blur] FFmpeg transcode failed; using raw mp4v (may not play in browser)")
+            if raw_path.exists() and not output_path.exists():
+                raw_path.replace(output_path)
+
+        duration_sec = processed / fps if fps > 0 else 0.0
         return {
             "target_ids_blurred": len(locked_targets),
             "total_frames": processed,
             "fps": fps,
             "width": width,
             "height": height,
+            "video_duration_sec": round(duration_sec, 2),
+            "match_threshold": match_threshold,
+            "device": self._device,
+            "browser_ready": output_path.exists(),
         }
 
 
@@ -466,9 +573,10 @@ def anonymize_video(
     reference_dir: Path,
     output_path: Path,
     *,
-    match_threshold: float = 0.65,
+    match_threshold: float = DEFAULT_MATCH_THRESHOLD,
     throttle: int = 3,
     grace: int = 30,
+    min_match_streak: int = 2,
     start_sec: Optional[float] = None,
     end_sec: Optional[float] = None,
 ) -> Dict[str, object]:
@@ -488,6 +596,7 @@ def anonymize_video(
             match_threshold=match_threshold,
             throttle=throttle,
             grace=grace,
+            min_match_streak=min_match_streak,
             start_sec=start_sec,
             end_sec=end_sec,
         )

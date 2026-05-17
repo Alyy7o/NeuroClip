@@ -4,6 +4,9 @@
 # --- Cell 1: Install dependencies ---
 # !pip install -r /kaggle/working/NeuroClip/backend/Semantic-search-app/backend/requirements.txt
 # !pip install -r /kaggle/working/NeuroClip/backend/Semantic-search-app/backend/requirements-blur.txt
+# !pip uninstall -y onnxruntime
+# !pip install onnxruntime-gpu
+# os.environ["BLUR_DEVICE"] = "cuda:0"
 # !pip install pyngrok
 
 # --- Cell 2: Verify environment ---

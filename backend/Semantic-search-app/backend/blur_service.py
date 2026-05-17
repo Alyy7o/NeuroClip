@@ -88,9 +88,16 @@ class BlurEngine:
         try:
             from insightface.app import FaceAnalysis
 
-            providers = ["CUDAExecutionProvider", "CPUExecutionProvider"]
-            if self._device == "cpu":
-                providers = ["CPUExecutionProvider"]
+            # Prefer CPU provider when CUDA onnxruntime is not installed (common on Kaggle)
+            providers = ["CPUExecutionProvider"]
+            try:
+                import onnxruntime as ort
+
+                available = set(ort.get_available_providers())
+                if "CUDAExecutionProvider" in available and "cuda" in self._device:
+                    providers = ["CUDAExecutionProvider", "CPUExecutionProvider"]
+            except Exception:
+                pass
             self._insightface = FaceAnalysis(
                 name=os.getenv("BLUR_INSIGHTFACE_MODEL", "buffalo_l"),
                 providers=providers,
@@ -111,9 +118,31 @@ class BlurEngine:
         vec /= np.linalg.norm(vec) + 1e-9
         return vec
 
+    def _detect_face_boxes_insightface(self, image_bgr: np.ndarray) -> List[Tuple[int, int, int, int]]:
+        """InsightFace detector — best for reference portrait photos."""
+        if self._insightface is None:
+            return []
+        boxes: List[Tuple[int, int, int, int]] = []
+        try:
+            faces = self._insightface.get(image_bgr)
+            for face in faces or []:
+                bbox = getattr(face, "bbox", None)
+                if bbox is None:
+                    continue
+                x1, y1, x2, y2 = map(int, bbox[:4])
+                if x2 - x1 >= 20 and y2 - y1 >= 20:
+                    boxes.append((x1, y1, x2, y2))
+        except Exception as exc:
+            logger.warning("[blur] InsightFace detect failed: %s", exc)
+        return boxes
+
     def _detect_face_boxes(self, image_bgr: np.ndarray) -> List[Tuple[int, int, int, int]]:
         """Return face/person boxes as (x1,y1,x2,y2)."""
-        boxes: List[Tuple[int, int, int, int]] = []
+        boxes = self._detect_face_boxes_insightface(image_bgr)
+        if boxes:
+            return boxes
+
+        boxes = []
         results = self._face_yolo.predict(
             image_bgr,
             verbose=False,
@@ -154,12 +183,30 @@ class BlurEngine:
             if img is None:
                 logger.warning("[blur] Could not read reference image: %s", path)
                 continue
-            for box in self._detect_face_boxes(img):
-                x1, y1, x2, y2 = box
-                crop = img[y1:y2, x1:x2]
-                if crop.size == 0:
-                    continue
-                embeddings.append(self._embed_face(crop))
+
+            added_for_image = False
+            if self._insightface is not None:
+                try:
+                    faces = self._insightface.get(img)
+                    for face in faces or []:
+                        emb = getattr(face, "embedding", None)
+                        if emb is not None:
+                            embeddings.append(np.asarray(emb, dtype=np.float32))
+                            added_for_image = True
+                except Exception as exc:
+                    logger.warning("[blur] InsightFace embed on %s failed: %s", path.name, exc)
+
+            if not added_for_image:
+                for box in self._detect_face_boxes(img):
+                    x1, y1, x2, y2 = box
+                    crop = img[y1:y2, x1:x2]
+                    if crop.size == 0:
+                        continue
+                    embeddings.append(self._embed_face(crop))
+                    added_for_image = True
+
+            if not added_for_image:
+                logger.warning("[blur] No face found in reference: %s", path.name)
 
         if not embeddings:
             raise ValueError(

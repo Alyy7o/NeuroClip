@@ -2992,8 +2992,20 @@ async def anonymize_video_endpoint(
             end_sec=end_sec,
         )
     except ValueError as e:
+        _agent_debug_log(
+            "main.py:anonymize_video_endpoint",
+            "anonymize-video ValueError",
+            {"detail": str(e), "saved_refs": saved_refs},
+            "H5",
+        )
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
+        _agent_debug_log(
+            "main.py:anonymize_video_endpoint",
+            "anonymize-video Exception",
+            {"detail": str(e), "type": type(e).__name__},
+            "H6",
+        )
         print(f"[anonymize-video] failed: {e}")
         raise HTTPException(status_code=500, detail=f"Anonymization failed: {e}")
 

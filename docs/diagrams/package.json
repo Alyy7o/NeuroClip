@@ -1,0 +1,12 @@
+{
+  "name": "neuroclip-diagrams",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Mermaid sources + render scripts for NeuroClip Chapter 4 diagrams",
+  "scripts": {
+    "render": "node render.js"
+  },
+  "devDependencies": {
+    "@mermaid-js/mermaid-cli": "^11.4.2"
+  }
+}

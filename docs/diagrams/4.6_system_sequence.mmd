@@ -1,0 +1,19 @@
+sequenceDiagram
+    autonumber
+    actor U as End User
+    participant S as NeuroClip System
+
+    U  ->> S : enterQuery(job_id, queryText, params)
+    S  -->> U : ack (loading state)
+    S  ->> S : process query (search + assemble)
+    S  -->> U : clipResults[ {start, end, url, score} ]
+    U  ->> S : playClip(url)
+    S  -->> U : video stream
+    U  ->> S : saveToHistory()
+    S  -->> U : historyEntryCreated(job_id)
+
+    U  ->> S : requestCompression(video_id, quality, resolution, bitrate)
+    S  -->> U : ack (compression queued)
+    S  ->> S : validate source + run FFmpeg compression
+    S  ->> S : store compressed file + log compression history
+    S  -->> U : compressedVideoUrl(size_before, size_after, url)

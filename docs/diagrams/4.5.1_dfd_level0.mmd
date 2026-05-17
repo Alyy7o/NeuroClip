@@ -1,0 +1,19 @@
+flowchart LR
+    User(("End User"))
+    Admin(("Admin"))
+    AAI(("AssemblyAI"))
+    Sup(("Supabase<br/>Auth/DB/Storage"))
+
+    NC[["NeuroClip<br/>System (0)"]]
+
+    User -- "Video upload, query, compression settings, profile updates" --> NC
+    NC   -- "Clips, compressed videos, transcripts, history, notifications" --> User
+
+    Admin -- "Policies, moderation actions" --> NC
+    NC    -- "Logs, analytics, content reports" --> Admin
+
+    NC  -- "Audio stream"   --> AAI
+    AAI -- "Transcript JSON" --> NC
+
+    NC  -- "Auth, source files, compressed outputs, vectors" --> Sup
+    Sup -- "Sessions, signed URLs, rows, stored media" --> NC

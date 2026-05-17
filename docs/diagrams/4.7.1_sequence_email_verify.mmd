@@ -1,0 +1,26 @@
+sequenceDiagram
+    autonumber
+    actor U as End User
+    participant FE as Frontend (React)
+    participant SUP as Supabase Auth
+    participant MAIL as Email Service
+    participant DB as Supabase DB
+
+    U   ->> FE  : signUp(email, password)
+    FE  ->> SUP : auth.signUp()
+    SUP ->> MAIL: send verification link (redirect=PROD_URL)
+    MAIL-->> U  : email with link
+
+    U   ->> MAIL: click verification link
+    MAIL->> SUP : verify(token)
+    SUP -->> FE : redirect to PROD_URL/callback
+    FE  ->> SUP : exchangeCodeForSession()
+    SUP -->> FE : session + user
+    FE  ->> DB  : upsert profile row
+    DB  -->> FE : ok
+    FE  -->> U  : route to /dashboard (onboarding)
+
+    U   ->> FE  : open Compression module
+    FE  ->> SUP : getSession()
+    SUP -->> FE : valid session
+    FE  -->> U  : render /compression page

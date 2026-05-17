@@ -1,0 +1,63 @@
+flowchart LR
+    User(("End User"))
+    Admin(("Admin"))
+    Backend(("Backend Service<br/>FastAPI"))
+    Supabase(("Supabase<br/>Auth / DB / Storage"))
+    AAI(("AssemblyAI"))
+
+    subgraph NeuroClip["NeuroClip System"]
+        direction TB
+        UC1(["Register / Login"])
+        UC2(["Upload Video"])
+        UC3(["Generate Transcript"])
+        UC4(["Compute &amp; Store Embeddings"])
+        UC5(["Search Clips by Query"])
+        UC6(["Play Retrieved Clips"])
+        UC7(["View Past Clips / History"])
+        UC8(["Summarize Video"])
+        UC9(["Blur Sensitive Regions"])
+        UC11(["Manage Profile"])
+        UC12(["Save Processing History"])
+        UC13(["Manage Content / Logs"])
+        subgraph CompressionModule["Compression Module"]
+            direction TB
+            UC10(["Compress Video"])
+            UC14(["Select Source Video"])
+            UC15(["Choose Compression Profile"])
+            UC16(["Run FFmpeg Compression"])
+            UC17(["Preview / Download Compressed File"])
+        end
+    end
+
+    User --- UC1
+    User --- UC2
+    User --- UC5
+    User --- UC6
+    User --- UC7
+    User --- UC8
+    User --- UC9
+    User --- UC10
+    User --- UC11
+
+    Admin --- UC13
+    Admin --- UC1
+
+    UC2 -. "&lt;&lt;include&gt;&gt;" .-> UC3
+    UC3 -. "&lt;&lt;include&gt;&gt;" .-> UC4
+    UC5 -. "&lt;&lt;include&gt;&gt;" .-> UC12
+    UC8 -. "&lt;&lt;include&gt;&gt;" .-> UC4
+    UC6 -. "&lt;&lt;extend&gt;&gt;"  .-> UC5
+    UC10 -. "&lt;&lt;include&gt;&gt;" .-> UC14
+    UC10 -. "&lt;&lt;include&gt;&gt;" .-> UC15
+    UC10 -. "&lt;&lt;include&gt;&gt;" .-> UC16
+    UC10 -. "&lt;&lt;include&gt;&gt;" .-> UC17
+    UC10 -. "&lt;&lt;include&gt;&gt;" .-> UC12
+
+    UC3 --- AAI
+    UC4 --- Backend
+    UC5 --- Backend
+    UC16 --- Backend
+    UC1 --- Supabase
+    UC12 --- Supabase
+    UC2 --- Supabase
+    UC17 --- Supabase

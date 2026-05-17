@@ -1,0 +1,47 @@
+flowchart TD
+    Start([Start]) --> Reg[Register Account]
+    Reg --> SendMail[Send Verification Email]
+    SendMail --> Verified{Email<br/>Verified?}
+    Verified -- No --> Resend[Resend Verification Link]
+    Resend --> Verified
+    Verified -- Yes --> Login[Login]
+    Login --> Onboard[Onboarding / Tour]
+    Onboard --> Dashboard[Open Dashboard]
+
+    Dashboard --> Upload[Upload Video<br/>or Paste URL]
+    Upload --> Validate{Valid File<br/>&amp; Quota?}
+    Validate -- No --> ShowErr[Show Error &amp; Accepted Formats]
+    ShowErr --> Upload
+    Validate -- Yes --> Store[Save to Supabase Storage]
+
+    Store --> Transcribe[Generate Transcript<br/>via AssemblyAI]
+    Transcribe --> TrOk{Transcript<br/>Ready?}
+    TrOk -- No --> Requeue[Re-queue Processing Job]
+    Requeue --> Transcribe
+    TrOk -- Yes --> Embed[Compute Sentence &amp;<br/>Video Embeddings]
+
+    Embed --> StoreVec[Store Vectors in pgvector<br/>linked by job_id]
+    StoreVec --> Ready[Video Ready Notification]
+
+    Ready --> ChooseModule{Choose Module}
+    ChooseModule -- Search Clips --> Query[Enter Search Query]
+    Query --> Search[Backend Semantic Search<br/>+ Rerank + Merge]
+    Search --> Hit{Clips<br/>Found?}
+    Hit -- No --> Suggest[Suggest Broader Query]
+    Suggest --> Query
+    Hit -- Yes --> Render[Render Playable Clips]
+    Render --> Save[Save to Processing History]
+    Save --> History[View / Replay from History]
+
+    ChooseModule -- Compression --> CompSource[Select Source Video<br/>or Clip]
+    CompSource --> CompProfile[Choose Compression Profile<br/>quality / resolution / bitrate]
+    CompProfile --> CompReq[Submit Compression Request]
+    CompReq --> CompProcess[FFmpeg Compresses Video<br/>and writes output file]
+    CompProcess --> CompOk{Compression<br/>Successful?}
+    CompOk -- No --> CompRetry[Show Error &amp; Retry<br/>with lower settings]
+    CompRetry --> CompProfile
+    CompOk -- Yes --> CompStore[Save Compressed File<br/>to Storage]
+    CompStore --> CompPreview[Preview / Download<br/>Compressed Video]
+    CompPreview --> CompHistory[Save Compression History]
+    CompHistory --> History
+    History --> End([End])

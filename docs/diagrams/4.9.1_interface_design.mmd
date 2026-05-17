@@ -1,0 +1,59 @@
+flowchart LR
+    subgraph Public["Public Routes"]
+        Index["/  (Landing)"]
+        Auth["/auth (Register / Login)"]
+    end
+
+    subgraph Protected["Protected Routes"]
+        Dashboard["/dashboard"]
+        Summarization["/summarization"]
+        Blurring["/blurring"]
+        Compression["/compression"]
+        History["/history"]
+        VideoClips["/video/:id"]
+        DownloadClip["/download-clip"]
+        Profile["/profile"]
+    end
+
+    subgraph Shared["Shared UI"]
+        Layout[DashboardLayout]
+        Header[Header]
+        BottomNav[BottomNav]
+        Player[VideoPlayer]
+        Loader[ProcessingLoader]
+        Toast[Toaster / Sonner]
+        Theme[ThemeToggle]
+    end
+
+    subgraph CompressionFlow["Compression Module UI"]
+        C1[Select Video / Upload Source]
+        C2[Choose Profile<br/>quality / resolution / bitrate]
+        C3[Start Compression]
+        C4[Progress + Size Metrics]
+        C5[Preview / Download Output]
+    end
+
+    Index --> Auth
+    Auth  --> Dashboard
+    Dashboard --> Summarization
+    Dashboard --> Blurring
+    Dashboard --> Compression
+    Dashboard --> History
+    Dashboard --> VideoClips
+    VideoClips --> DownloadClip
+    Dashboard --> Profile
+
+    Layout --- Header
+    Layout --- BottomNav
+    Layout --- Theme
+    VideoClips --- Player
+    Summarization --- Loader
+    Blurring --- Loader
+    Compression --- Loader
+    Compression --> C1
+    C1 --> C2
+    C2 --> C3
+    C3 --> C4
+    C4 --> C5
+    C5 --> History
+    Layout --- Toast

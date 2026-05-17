@@ -1,0 +1,47 @@
+sequenceDiagram
+    autonumber
+    actor U as End User
+    participant FE as Frontend (VideoClips.tsx)
+    participant API as FastAPI /clips/search-db
+    participant SS as SearchService
+    participant ES as EmbeddingService
+    participant VS as VectorStore (pgvector)
+    participant ST as StorageService (Supabase Storage)
+    participant CS as CompressionService
+    participant FF as FFmpeg Worker
+    participant HS as HistoryService
+
+    U  ->> FE  : submit(query, top_k)
+    FE ->> API : POST /clips/search-db {job_id, query, top_k}
+    API ->> SS : process_query(job_id, query, params)
+    SS  ->> ES : encode(query)
+    ES  -->> SS: query_vector
+
+    SS  ->> VS : search(query_vector, top_k)
+    VS  -->> SS: candidate_rows[]
+
+    SS  ->> SS : rerank() + merge_neighbors()
+    SS  ->> ST : get_clip_url(video_id, start, end) [for each]
+    ST  -->> SS: signed_urls[]
+
+    SS  ->> HS : record_event(user_id, job_id, query, status="ok")
+    HS  -->> SS: history_id
+
+    SS  -->> API: ClipResult[]
+    API -->> FE : 200 JSON {clips, history_id}
+    FE  -->> U  : render player + clip list
+
+    U  ->> FE  : requestCompression(video_id, preset)
+    FE ->> API : POST /compress-video {video_id, preset}
+    API ->> CS : compress_video(video_id, preset)
+    CS  ->> ST : fetch source video
+    ST  -->> CS: source path / signed URL
+    CS  ->> FF : ffmpeg -i source -b:v/-crf preset output
+    FF  -->> CS: compressed file + metrics
+    CS  ->> ST : upload compressed output
+    ST  -->> CS: compressed signed URL
+    CS  ->> HS : record_event(module="compression", status="ok")
+    HS  -->> CS: compression_history_id
+    CS  -->> API: CompressionResult {url, original_size, compressed_size}
+    API -->> FE : 200 JSON {compressed_url, metrics}
+    FE  -->> U  : preview / download compressed video

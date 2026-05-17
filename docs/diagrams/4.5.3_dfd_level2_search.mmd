@@ -1,0 +1,47 @@
+flowchart TB
+    User(("End User"))
+    D2[("Videos")]
+    D3[("Transcripts")]
+    D4[("Embeddings")]
+    D5[("Clip Assets")]
+    D6[("Processing History")]
+    D8[("Compressed Videos")]
+
+    subgraph SearchAssembly["P4: Clip Search &amp; Assembly"]
+        direction TB
+        P41[["P4.1<br/>Intent Classification (optional)"]]
+        P42[["P4.2<br/>Retrieval<br/>(semantic + keyword boost)"]]
+        P43[["P4.3<br/>Reranking &amp;<br/>Neighbor Merging"]]
+        P44[["P4.4<br/>Clip Boundary Assembly<br/>&amp; URL Generation"]]
+        P45[["P4.5<br/>History Logging"]]
+    end
+
+    subgraph CompressionModule["P6: Video Compression Module"]
+        direction TB
+        P61[["P6.1<br/>Validate Source Video"]]
+        P62[["P6.2<br/>Select Compression Profile"]]
+        P63[["P6.3<br/>Run FFmpeg Compression"]]
+        P64[["P6.4<br/>Store Compressed Output<br/>&amp; Signed URL"]]
+        P65[["P6.5<br/>Compression History Logging"]]
+    end
+
+    User -- query --> P41
+    P41 -- normalized intent --> P42
+    P42 <--> D4
+    P42 -- candidate spans --> P43
+    P43 <--> D3
+    P43 -- merged spans --> P44
+    P44 <--> D5
+    P44 -- clip URLs --> User
+    P44 -- record --> P45
+    P45 --> D6
+
+    User -- video_id + quality settings --> P61
+    P61 <--> D2
+    P61 -- valid source --> P62
+    P62 -- bitrate / resolution / codec --> P63
+    P63 -- compressed file --> P64
+    P64 --> D8
+    P64 -- download / preview URL --> User
+    P64 -- compression record --> P65
+    P65 --> D6

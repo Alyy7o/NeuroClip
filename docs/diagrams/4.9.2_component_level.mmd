@@ -1,0 +1,62 @@
+flowchart TB
+    subgraph FE["Frontend (React + Vite + TS)"]
+        direction TB
+        Pages[Pages: Dashboard, VideoClips,<br/>Summarization, Blurring, Compression, History]
+        Comp[Reusable Components<br/>VideoInput · VideoPlayer · ProcessingLoader · UI/shadcn]
+        Ctx[Contexts<br/>AuthContext · ThemeContext]
+        Hooks[Hooks<br/>use-mobile · use-toast]
+        Client[Supabase JS Client]
+        QueryC[React Query Client]
+    end
+
+    subgraph BE["Backend (FastAPI / Python)"]
+        direction TB
+        Routes["API Routes<br/>/upload-video · /upload-via-url<br/>/assemblyai/transcribe-* · /clips/search · /clips/search-db<br/>/upload-and-search · /compress-video · /history · /download · /serve-clip"]
+        Models[Pydantic Models<br/>ClipSearchRequest · DbSearchRequest ·<br/>CompressionRequest · UploadUrlRequest · TranscribeURLRequest]
+        Services[Service Layer<br/>SearchService · EmbeddingService ·<br/>HistoryService · StorageService · Transcriber]
+        CompressSvc[CompressionService<br/>validate source · map preset · invoke FFmpeg · return metrics]
+    end
+
+    subgraph PIPE["AI / ML Pipeline"]
+        direction TB
+        Trans[Transcription<br/>AssemblyAI]
+        Embed[Embedding Models<br/>sentence-transformers<br/>MiniLM / CLIP]
+        Vec[Vector Store<br/>Supabase pgvector]
+        FFmpeg[FFmpeg<br/>cut · mux · compress · blur]
+        YT[yt-dlp<br/>URL ingestion]
+    end
+
+    subgraph DATA["Data &amp; Identity"]
+        SupAuth[(Supabase Auth)]
+        SupDB[(Postgres + pgvector)]
+        SupStore[(Supabase Storage)]
+    end
+
+    Pages --> Comp
+    Pages --> Ctx
+    Pages --> Hooks
+    Pages --> QueryC
+    Ctx --> Client
+    QueryC -- HTTPS/JSON --> Routes
+
+    Routes --> Models
+    Routes --> Services
+    Routes --> CompressSvc
+    Services --> Trans
+    Services --> Embed
+    Services --> Vec
+    Services --> FFmpeg
+    Services --> YT
+    CompressSvc --> FFmpeg
+    CompressSvc --> SupStore
+    CompressSvc --> SupDB
+
+    Trans --> SupStore
+    Embed --> Vec
+    Vec   --> SupDB
+    FFmpeg --> SupStore
+    YT    --> SupStore
+    Client --> SupAuth
+    Client --> SupDB
+    Services --> SupDB
+    Services --> SupStore

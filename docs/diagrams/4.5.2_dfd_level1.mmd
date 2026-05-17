@@ -1,0 +1,52 @@
+flowchart TB
+    User(("End User"))
+    Admin(("Admin"))
+    AAI(("AssemblyAI"))
+
+    P1[["P1<br/>Auth &amp; Profile"]]
+    P2[["P2<br/>Video Ingestion"]]
+    P3[["P3<br/>Embedding Computation"]]
+    P4[["P4<br/>Clip Search &amp; Assembly"]]
+    P5[["P5<br/>Admin / Content Ops"]]
+    P6[["P6<br/>Video Compression Module"]]
+
+    D1[("D1: Profiles")]
+    D2[("D2: Videos")]
+    D3[("D3: Transcripts")]
+    D4[("D4: Embeddings (pgvector)")]
+    D5[("D5: Clip Assets / Storage")]
+    D6[("D6: Processing History")]
+    D7[("D7: Knowledge / Vectors")]
+    D8[("D8: Compressed Videos")]
+
+    User -- credentials --> P1
+    P1   -- session     --> User
+    P1 <--> D1
+
+    User -- video / URL --> P2
+    P2 -- file --> D2
+    P2 -- audio --> AAI
+    AAI -- transcript --> P2
+    P2 -- segments --> D3
+    P2 -- "job_id" --> P3
+
+    P3 <--> D2
+    P3 <--> D3
+    P3 -- vectors --> D4
+
+    User -- query --> P4
+    P4 -- search --> D4
+    P4 -- read --> D3
+    P4 -- write --> D5
+    P4 -- log --> D6
+    P4 -- clips --> User
+
+    User -- compression settings --> P6
+    P6 -- read source video --> D2
+    P6 -- ffmpeg output --> D8
+    P6 -- compressed file URL --> User
+    P6 -- compression event --> D6
+
+    Admin -- ingest / policies --> P5
+    P5 <--> D7
+    P5 -- review --> D6

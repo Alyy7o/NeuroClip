@@ -1,0 +1,45 @@
+flowchart LR
+    subgraph Client["Client Device"]
+        Browser["Web Browser<br/>(Chrome / Edge / Safari)"]
+    end
+
+    subgraph Vercel["Vercel Edge / CDN"]
+        SPA["NeuroClip SPA<br/>(React + Vite build)<br/>env: VITE_SITE_URL,<br/>VITE_SUPABASE_URL,<br/>VITE_API_URL"]
+    end
+
+    subgraph Backend["Backend Host (Render / Railway / Local Dev)"]
+        FastAPI["FastAPI Server<br/>Uvicorn :8000"]
+        Worker["Background Worker<br/>(transcription · embedding · ffmpeg)"]
+        CompressWorker["Compression Worker<br/>FFmpeg presets<br/>CRF / bitrate / resolution"]
+        Cache[("Vector Cache /<br/>Hot-Reload Index")]
+    end
+
+    subgraph SupabaseCloud["Supabase Cloud"]
+        Auth["Auth Service<br/>(JWT, RLS)"]
+        PG[("Postgres<br/>+ pgvector")]
+        Storage[("Object Storage<br/>(videos, clips,<br/>compressed outputs)")]
+    end
+
+    subgraph External["External Services"]
+        AAI["AssemblyAI<br/>Transcription API"]
+        YT["YouTube /<br/>External Video URLs"]
+    end
+
+    Browser -- HTTPS --> SPA
+    SPA -- HTTPS / JSON --> FastAPI
+    SPA -- POST /compress-video --> FastAPI
+    SPA -- JS SDK / HTTPS --> Auth
+    SPA -- JS SDK --> PG
+    SPA -- signed URL --> Storage
+
+    FastAPI <--> Worker
+    FastAPI <--> CompressWorker
+    FastAPI -- SQL --> PG
+    FastAPI -- REST --> AAI
+    FastAPI -- HTTPS --> Storage
+    Worker -- yt-dlp --> YT
+    Worker -- ffmpeg artefacts --> Storage
+    Worker -- vectors --> PG
+    CompressWorker -- compressed mp4/webm --> Storage
+    CompressWorker -- compression metrics/history --> PG
+    FastAPI <--> Cache

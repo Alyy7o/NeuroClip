@@ -1,0 +1,136 @@
+classDiagram
+    direction LR
+
+    class User {
+        +UUID id
+        +string email
+        +string display_name
+        +datetime created_at
+        +login()
+        +logout()
+    }
+
+    class Video {
+        +UUID id
+        +UUID user_id
+        +string title
+        +string video_url
+        +float duration
+        +datetime created_at
+    }
+
+    class TranscriptSegment {
+        +UUID id
+        +UUID video_id
+        +float start
+        +float end
+        +string text
+    }
+
+    class EmbeddingRow {
+        +UUID id
+        +UUID video_id
+        +UUID job_id
+        +string type
+        +vector vector
+        +datetime created_at
+    }
+
+    class ProcessingHistory {
+        +UUID id
+        +UUID user_id
+        +UUID job_id
+        +string module
+        +string query
+        +string status
+        +datetime created_at
+    }
+
+    class ClipRequest {
+        +UUID id
+        +UUID job_id
+        +string query
+        +int top_k
+        +dict params
+    }
+
+    class ClipResult {
+        +UUID id
+        +UUID job_id
+        +float start
+        +float end
+        +string url
+        +float score
+    }
+
+    class CompressionRequest {
+        +UUID id
+        +UUID video_id
+        +string preset
+        +int target_resolution
+        +int target_bitrate
+        +float crf
+    }
+
+    class CompressionResult {
+        +UUID id
+        +UUID request_id
+        +string output_url
+        +int original_size
+        +int compressed_size
+        +float compression_ratio
+        +datetime created_at
+    }
+
+    class Transcriber {
+        +generate_transcript(audio) Transcript
+    }
+
+    class EmbeddingService {
+        +encode_sentences(list) list
+        +encode_query(string) vector
+        +store_vectors(rows) void
+    }
+
+    class SearchService {
+        +process_query(job_id, query, params) ClipResult
+        +rerank(candidates) candidates
+        +merge_neighbors(candidates) candidates
+    }
+
+    class CompressionService {
+        +validate_source(video_id) bool
+        +build_ffmpeg_args(preset) list
+        +compress_video(video_id, preset) CompressionResult
+        +calculate_metrics(input, output) dict
+    }
+
+    class HistoryService {
+        +record_event(user_id, job_id, module, query, status) UUID
+        +list_for_user(user_id) ProcessingHistory
+    }
+
+    class StorageService {
+        +save_video(file) string
+        +get_clip_url(video_id, start, end) string
+    }
+
+    User "1" --> "0..*" Video : owns
+    Video "1" --> "0..*" TranscriptSegment : has
+    Video "1" --> "0..*" EmbeddingRow : has
+    User "1" --> "0..*" ProcessingHistory : performs
+    ClipRequest "1" --> "0..*" ClipResult : produces
+    Video "1" --> "0..*" CompressionRequest : compresses
+    CompressionRequest "1" --> "1" CompressionResult : produces
+
+    SearchService ..> EmbeddingService : uses
+    SearchService ..> StorageService   : uses
+    SearchService ..> HistoryService   : uses
+    SearchService ..> EmbeddingRow     : queries
+    CompressionService ..> StorageService : reads_writes
+    CompressionService ..> HistoryService : logs
+    CompressionService ..> CompressionRequest : validates
+    CompressionService ..> CompressionResult : creates
+    EmbeddingService ..> EmbeddingRow  : persists
+    Transcriber ..> TranscriptSegment  : creates
+    StorageService ..> Video           : reads_writes

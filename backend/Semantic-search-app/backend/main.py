@@ -23,7 +23,7 @@ BASE_DIR = Path(__file__).resolve().parent
 REPO_ROOT = BASE_DIR.parents[1]
 
 # --- App Initialization ---
-API_BUILD_ID = "2026-05-summarize-async-v1"
+API_BUILD_ID = "2026-05-groq-clip-refine-v2"
 app = FastAPI()
 
 
@@ -721,34 +721,9 @@ def process_video_workflow(
 
     sentences = parse_srt_blocks(srt_text)
     
-    # Merge OCR text into sentences — attach to the BEST matching sentence
-    if ocr_text_data and sentences:
-        for ocr_item in ocr_text_data:
-            ts = ocr_item["timestamp"]
-            text = ocr_item["text"]
-            best_match = None
-            best_dist = float('inf')
-            for s in sentences:
-                s_start = float(s["starttime"])
-                s_end = float(s["endtime"])
-                if s_start <= ts <= s_end:
-                    best_match = s
-                    best_dist = 0
-                    break
-                dist = min(abs(s_start - ts), abs(s_end - ts))
-                if dist < 5.0 and dist < best_dist:
-                    best_dist = dist
-                    best_match = s
-            if best_match is not None:
-                best_match["sentence"] += f" [On Screen: {text}]"
-            else:
-                sentences.append({
-                    "sentence": f"[Visual Content]: {text}",
-                    "starttime": f"{ts:.2f}",
-                    "endtime": f"{ts+2.0:.2f}",
-                    "verbs": ["visual_ocr"]
-                })
-        sentences.sort(key=lambda x: float(x["starttime"]))
+    from transcript_utils import merge_ocr_into_sentences
+
+    sentences = merge_ocr_into_sentences(sentences, ocr_text_data)
 
     merge_elapsed = time.time() - merge_start
     print(f"[PIPELINE] SRT parsing + OCR merge completed in {merge_elapsed:.1f}s ({len(sentences)} sentences)")
@@ -1159,12 +1134,16 @@ def clips_search(payload: ClipSearchRequest):
     clips_dir = out_dir / "clips" / (json_path.stem.split("_")[0])
     clips_dir.mkdir(parents=True, exist_ok=True)
 
-    # ── CLEAN QUERY: Strip appended timestamp noise like "[0.0s - 575.1s]" ──
-    clean_query = re.sub(r'\s*\[\d+\.?\d*s\s*-\s*\d+\.?\d*s\]\s*$', '', payload.query).strip()
+    from transcript_utils import (
+        clip_display_text,
+        clean_query_text,
+        join_sentences_in_range,
+        strip_ocr_markup,
+    )
+
+    clean_query = clean_query_text(payload.query)
     if clean_query != payload.query:
         print(f"[clips/search] Cleaned query: '{payload.query}' → '{clean_query}'")
-    if not clean_query:
-        clean_query = payload.query  # fallback if regex ate everything
 
     # ── Strategy 1: Substantive LLM Search (Groq primary, Gemini fallback) ──
     llm_segments = llm_intelligent_search(clean_query, sentences, top_k=payload.top_k)
@@ -1202,12 +1181,9 @@ def clips_search(payload: ClipSearchRequest):
             except Exception:
                 pass
 
-            # Build transcript text for this time range
-            text_segment = " ".join([
-                s.get("sentence", "") for s in sentences
-                if float(s.get("starttime", 0)) >= seg["start"] - 1
-                and float(s.get("endtime", 0)) <= seg["end"] + 1
-            ])
+            text_segment = join_sentences_in_range(
+                sentences, seg["start"], seg["end"], max_chars=600
+            )
 
             # Extract clip with ffmpeg
             clip_path = clips_dir / f"clip_{rank:02d}.mp4"
@@ -1261,15 +1237,16 @@ def clips_search(payload: ClipSearchRequest):
             relevance_map = {"high": 1.0, "medium": 0.7, "low": 0.4}
             score = relevance_map.get(seg.get("relevance", "medium"), 0.7)
 
+            llm_sum = seg.get("summary", "")
             results.append({
                 "rank": rank,
                 "score": score,
-                "text": text_segment or seg.get("summary", ""),
+                "text": clip_display_text(text_segment, llm_sum),
                 "start": start,
                 "end": end,
                 "clip_path": str(clip_path) if clip_path else None,
                 "clip_url": f"/serve-clip?path={clip_rel.as_posix()}" if clip_rel else None,
-                "llm_summary": seg.get("summary"),
+                "llm_summary": llm_sum,
             })
 
         # Generate topic explanation
@@ -1358,8 +1335,9 @@ def clips_search(payload: ClipSearchRequest):
         if ce is not None and preselect:
             pairs = []
             for _, a, b in preselect:
-                txt = " ".join([sentences[t].get("sentence", "") for t in range(a, b+1)])
-                pairs.append((payload.query, txt))
+                from transcript_utils import join_sentences_clean
+                txt = join_sentences_clean(sentences, a, b, max_chars=800)
+                pairs.append((clean_query, txt))
             try:
                 ce_scores = ce.predict(pairs)
                 preselect = [(float(ce_scores[i]), preselect[i][1], preselect[i][2]) for i in range(len(preselect))]
@@ -1448,8 +1426,10 @@ def clips_search(payload: ClipSearchRequest):
             clip_path = None
         clip_rel = clip_path.relative_to(out_dir) if clip_path else None
         
-        text_segment = " ".join([sentences[t].get("sentence") for t in range(a, b+1)])
-        
+        from transcript_utils import join_sentences_clean
+
+        text_segment = join_sentences_clean(sentences, a, b, max_chars=600)
+
         results.append({
             "rank": rank,
             "score": score,
@@ -1461,38 +1441,17 @@ def clips_search(payload: ClipSearchRequest):
             "llm_summary": None,
         })
 
-    # LLM refinement: enrich embedding-based results with summaries AND filter irrelevant
-    try:
-        llm_candidates = [
-            {"index": i, "text": r["text"], "start": r["start"], "end": r["end"]}
-            for i, r in enumerate(results)
-        ]
-        llm_results = refine_with_llm(clean_query, llm_candidates)
-        llm_map = {item["segment_index"]: item for item in llm_results}
-        
-        filtered_results = []
-        for i, r in enumerate(results):
-            if i in llm_map:
-                llm_item = llm_map[i]
-                r["llm_summary"] = llm_item.get("summary")
-                # Filter out segments the LLM says are NOT relevant
-                if llm_item.get("relevant", True) is False:
-                    print(f"[LLM Filter] Removing clip #{r['rank']} — marked as irrelevant")
-                    continue
-            filtered_results.append(r)
-        
-        # Re-rank remaining results
-        for new_rank, r in enumerate(filtered_results, 1):
-            r["rank"] = new_rank
-        results = filtered_results
-        print(f"[LLM Filter] {len(results)} clips survived relevance filter")
-    except Exception as e:
-        print(f"LLM enrichment failed in clips_search: {e}")
+    results, refinement_meta = _apply_groq_clip_refinement(clean_query, results)
 
     # Generate topic explanation
     topic_explanation = _generate_topic_explanation(clean_query, results)
 
-    return {"results": results, "count": len(results), "topic_explanation": topic_explanation}
+    return {
+        "results": results,
+        "count": len(results),
+        "topic_explanation": topic_explanation,
+        "refinement_meta": refinement_meta,
+    }
 
 class UploadAndSearchResponse(BaseModel):
     job_id: str
@@ -1781,21 +1740,9 @@ def llm_intelligent_search(query: str, sentences: list, top_k: int = 10) -> list
         print("[LLM] No API key set (GROQ_API_KEY or GOOGLE_API_KEY) — falling back to embedding search")
         return []
     
-    # Build a condensed transcript with timestamps
-    CHUNK_SIZE = 5
-    chunks = []
-    for i in range(0, len(sentences), CHUNK_SIZE):
-        group = sentences[i:i+CHUNK_SIZE]
-        start_t = group[0].get("starttime", "0")
-        end_t = group[-1].get("endtime", "0")
-        text = " ".join(s.get("sentence", "") for s in group)
-        chunks.append(f"[{start_t}s - {end_t}s]: {text}")
-    
-    transcript_text = "\n".join(chunks)
-    
-    # Limit to ~12000 chars for token safety
-    if len(transcript_text) > 12000:
-        transcript_text = transcript_text[:12000] + "\n[... transcript truncated ...]"
+    from transcript_utils import condensed_transcript_for_llm
+
+    transcript_text = condensed_transcript_for_llm(sentences)
     
     prompt = f"""You are an expert video content analyst performing STRICT semantic search on a video transcript.
 
@@ -1871,6 +1818,63 @@ Respond ONLY with valid JSON:
         return []
 
 
+def _apply_groq_clip_refinement(query: str, results: list) -> tuple:
+    """Groq-refine clip descriptions; set display text from summary. Returns (results, meta)."""
+    from transcript_utils import clip_display_text, strip_ocr_markup
+
+    meta = {
+        "groq_available": bool(os.getenv("GROQ_API_KEY", "").strip()),
+        "gemini_available": bool(os.getenv("GOOGLE_API_KEY", "").strip()),
+        "summaries_applied": 0,
+        "refinement_error": None,
+    }
+    if not results:
+        return results, meta
+    try:
+        llm_candidates = []
+        for i, r in enumerate(results):
+            raw = strip_ocr_markup(r.get("text", "") or "")
+            if len(raw) > 1200:
+                raw = raw[:1197] + "..."
+            llm_candidates.append(
+                {
+                    "index": i,
+                    "text": raw or "(visual segment, minimal speech)",
+                    "start": r["start"],
+                    "end": r["end"],
+                }
+            )
+        llm_results = refine_with_llm(query, llm_candidates)
+        llm_map = {item["segment_index"]: item for item in llm_results}
+        meta["llm_segments_returned"] = len(llm_results)
+        filtered = []
+        for i, r in enumerate(results):
+            if i in llm_map:
+                item = llm_map[i]
+                summary = (item.get("summary") or "").strip()
+                r["llm_summary"] = summary
+                if item.get("relevant", True) is False:
+                    print(f"[LLM Filter] Removing clip #{r.get('rank')} — irrelevant")
+                    continue
+                r["text"] = clip_display_text(r.get("text", ""), summary)
+                if summary:
+                    meta["summaries_applied"] += 1
+            else:
+                r["text"] = clip_display_text(r.get("text", ""), r.get("llm_summary"))
+            filtered.append(r)
+        for new_rank, r in enumerate(filtered, 1):
+            r["rank"] = new_rank
+        print(f"[Groq] {len(filtered)} clips after refinement ({meta['summaries_applied']} summaries)")
+        return filtered, meta
+    except Exception as e:
+        print(f"[Groq] Clip refinement failed: {e}")
+        meta["refinement_error"] = str(e)[:200]
+        from transcript_utils import clip_display_text as _cdt
+        for r in results:
+            r["text"] = _cdt(r.get("text", ""), r.get("llm_summary"))
+        return results, meta
+
+
 def refine_with_llm(query: str, candidates: list) -> list:
     """
     Send candidate transcript segments to LLM for relevance assessment and summary.
@@ -1885,7 +1889,10 @@ def refine_with_llm(query: str, candidates: list) -> list:
     
     segments_text = ""
     for c in candidates:
-        segments_text += f"[Segment {c['index']}] {c['start']:.1f}s - {c['end']:.1f}s: \"{c['text']}\"\n"
+        snippet = (c.get("text") or "")[:900]
+        segments_text += (
+            f"[Segment {c['index']}] {c['start']:.1f}s - {c['end']:.1f}s: \"{snippet}\"\n"
+        )
     
     prompt = f"""You are a strict video content relevance judge. Given the user's query and transcript segments, you must:
 1. Determine if each segment is TRULY RELEVANT to the query (not just containing similar keywords)
@@ -1935,9 +1942,11 @@ def _generate_topic_explanation(query: str, results: list) -> str:
     if not results:
         return ""
 
+    from transcript_utils import strip_ocr_markup
+
     segments_context = ""
     for r in results[:5]:
-        text = r.get("text", "") or r.get("llm_summary", "")
+        text = (r.get("llm_summary") or "").strip() or strip_ocr_markup(r.get("text", "") or "")
         if text:
             segments_context += f"- [{r['start']:.1f}s - {r['end']:.1f}s]: {text[:400]}\n"
     if not segments_context:
@@ -1978,6 +1987,13 @@ def clips_search_db(payload: DbSearchRequest):
     if supabase is None:
         raise HTTPException(status_code=500, detail="Supabase not configured")
     try:
+        from transcript_utils import (
+            clean_query_text,
+            join_sentences_clean,
+            join_sentences_in_range,
+        )
+
+        clean_query = clean_query_text(payload.query)
         # Locate JSON by job_id instead of user_videos
         out_dir = REPO_ROOT / "output_data"
         matches = list(out_dir.glob(f"{payload.job_id}_*.v4.json"))
@@ -2016,7 +2032,7 @@ def clips_search_db(payload: DbSearchRequest):
             return sum(x*y for x, y in zip(a, b))
         def norm(a):
             return math.sqrt(sum(x*x for x in a))
-        q_vec = list(map(float, get_model().encode([payload.query])[0]))
+        q_vec = list(map(float, get_model().encode([clean_query])[0]))
         candidates = []
         if payload.use_windows and len(vecs) >= payload.window_size:
             W = max(1, int(payload.window_size))
@@ -2064,8 +2080,8 @@ def clips_search_db(payload: DbSearchRequest):
             if ce is not None and preselect:
                 pairs = []
                 for _, a, b in preselect:
-                    txt = " ".join([sentences[t].get("sentence", "") for t in range(a, b+1)])
-                    pairs.append((payload.query, txt))
+                    txt = join_sentences_clean(sentences, a, b, max_chars=800)
+                    pairs.append((clean_query, txt))
                 try:
                     ce_scores = ce.predict(pairs)
                     preselect = [(float(ce_scores[i]), preselect[i][1], preselect[i][2]) for i in range(len(preselect))]
@@ -2124,10 +2140,11 @@ def clips_search_db(payload: DbSearchRequest):
             if not ok:
                 clip_path = None
             clip_rel = clip_path.relative_to(out_dir) if clip_path else None
+            text_segment = join_sentences_clean(sentences, a, b, max_chars=600)
             results.append({
                 "rank": rank,
                 "score": score,
-                "text": " ".join([sentences[t].get("sentence") for t in range(a, b+1)]),
+                "text": text_segment,
                 "start": start,
                 "end": start + dur,
                 "clip_path": str(clip_path) if clip_path else None,
@@ -2135,21 +2152,14 @@ def clips_search_db(payload: DbSearchRequest):
                 "llm_summary": None,
             })
 
-        # LLM refinement: enrich results with AI-generated summaries
-        try:
-            llm_candidates = [
-                {"index": i, "text": r["text"], "start": r["start"], "end": r["end"]}
-                for i, r in enumerate(results)
-            ]
-            llm_results = refine_with_llm(payload.query, llm_candidates)
-            llm_map = {item["segment_index"]: item for item in llm_results}
-            for i, r in enumerate(results):
-                if i in llm_map:
-                    r["llm_summary"] = llm_map[i].get("summary")
-        except Exception as e:
-            print(f"LLM enrichment failed in clips_search_db: {e}")
-
-        return {"results": results, "count": len(results)}
+        results, refinement_meta = _apply_groq_clip_refinement(clean_query, results)
+        topic_explanation = _generate_topic_explanation(clean_query, results)
+        return {
+            "results": results,
+            "count": len(results),
+            "topic_explanation": topic_explanation,
+            "refinement_meta": refinement_meta,
+        }
     except HTTPException:
         raise
     except Exception as e:

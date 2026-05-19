@@ -9,6 +9,7 @@ import { Label } from '@/components/ui/label'
 import { VideoPlayer } from '@/components/VideoPlayer'
 import { useToast } from '@/hooks/use-toast'
 import { supabase } from '@/integrations/supabase/client'
+import { clipDescription } from '@/lib/clipText'
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8040'
 
@@ -17,7 +18,15 @@ export default function VideoClips() {
   const [sp] = useSearchParams()
   type VideoMeta = { id?: string; job_id?: string; title?: string; video_url?: string; created_at?: string; duration?: number; original_filename?: string };
   type HistoryRow = { id: string; created_at: string; query?: string | null; status: string };
-  type ClipRow = { rank: number; score: number; text: string; start: number; end: number; clip_url: string | null };
+  type ClipRow = {
+    rank: number;
+    score: number;
+    text: string;
+    start: number;
+    end: number;
+    clip_url: string | null;
+    llm_summary?: string | null;
+  };
   type VideoEmbRow = { job_id?: string; video_embedding?: number[] | null; transcript_embedding?: number[] | null };
   const [video, setVideo] = useState<VideoMeta | null>(null)
   const [query, setQuery] = useState('')
@@ -35,6 +44,7 @@ export default function VideoClips() {
   const [minClipSecs, setMinClipSecs] = useState(20)
   const [maxClipSecs, setMaxClipSecs] = useState(120)
   const [useRerank, setUseRerank] = useState(true)
+  const [topicExplanation, setTopicExplanation] = useState('')
   const { toast } = useToast()
 
   useEffect(() => {
@@ -91,6 +101,8 @@ export default function VideoClips() {
     setSearching(true)
     try {
       setClips([])
+      setTopicExplanation('')
+      let endpoint = 'search-db'
       let resp = await fetch(`${API_BASE}/clips/search-db`, {
         method: 'POST',
         headers: { 
@@ -101,6 +113,7 @@ export default function VideoClips() {
       })
       if (!resp.ok) {
         try { const err = await resp.json(); console.warn('search-db failed:', err) } catch { }
+        endpoint = 'search'
         resp = await fetch(`${API_BASE}/clips/search`, {
           method: 'POST',
           headers: { 
@@ -116,12 +129,19 @@ export default function VideoClips() {
         setClips([])
         return
       }
-      const mapped = (json.results || []).map((c: { clip_url?: string; start: number; end: number; score: number; text: string }) => {
+      const mapped = (json.results || []).map((c: ClipRow & { clip_url?: string }) => {
         const base = c.clip_url ? `${API_BASE}${c.clip_url}` : null
-        return { ...c, clip_url: base ? `${base}?ts=${Date.now()}` : null }
+        return {
+          ...c,
+          clip_url: base ? `${base}?ts=${Date.now()}` : null,
+          text: clipDescription(c.text, c.llm_summary),
+        }
       })
-      console.log('clips mapped', mapped.length, mapped)
+      setTopicExplanation(json.topic_explanation || '')
       setClips(mapped)
+      // #region agent log
+      fetch('http://127.0.0.1:7349/ingest/b5b03500-6997-4666-8a59-a196e0f10b38',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'743c18'},body:JSON.stringify({sessionId:'743c18',location:'VideoClips.tsx:runSearch',message:'clip search done',data:{endpoint,clipCount:mapped.length,hasTopic:!!json.topic_explanation,refinement:json.refinement_meta||null,samples:mapped.slice(0,2).map((c: ClipRow)=>({hasSummary:!!c.llm_summary,textLen:c.text?.length||0,preview:(c.text||'').slice(0,80)}))},timestamp:Date.now(),hypothesisId:'H1-H4'})}).catch(()=>{});
+      // #endregion
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : String(e)
       toast({ title: 'Search failed', description: msg })
@@ -181,13 +201,19 @@ export default function VideoClips() {
                 </div>
               </div>
             </div>
+            {topicExplanation && (
+              <div className="rounded-lg border border-border bg-muted/30 p-4 text-sm leading-relaxed">
+                <p className="font-medium mb-1">Topic overview</p>
+                <p className="text-muted-foreground">{topicExplanation}</p>
+              </div>
+            )}
             {clips.length > 0 && (
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                 {clips.map((c, i) => (
                   <div key={c.clip_url || `${c.rank}-${i}`} className="space-y-2">
                     {c.clip_url ? <VideoPlayer key={c.clip_url} videoUrl={c.clip_url} autoPlay={false} /> : <div className="text-sm text-muted-foreground">Clip not available</div>}
                     <div className="text-sm text-muted-foreground">{formatTimestamp(c.start)} - {formatTimestamp(c.end)} • score {c.score.toFixed(3)}</div>
-                    <div className="text-sm">{c.text}</div>
+                    <p className="text-sm text-foreground/90 leading-relaxed">{c.text}</p>
                     {c.clip_url && (
                       <Button variant="outline" size="sm" className="w-full mt-1" onClick={() => {
                         const clipUrlStr = c.clip_url || '';

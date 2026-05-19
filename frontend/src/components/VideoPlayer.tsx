@@ -50,9 +50,6 @@ export function VideoPlayer({ videoUrl, autoPlay = false }: VideoPlayerProps) {
         if (!cancelled) {
           const url = URL.createObjectURL(blob);
           setBlobUrl(url);
-          // #region agent log
-          fetch('http://127.0.0.1:7349/ingest/b5b03500-6997-4666-8a59-a196e0f10b38',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'743c18'},body:JSON.stringify({sessionId:'743c18',location:'VideoPlayer.tsx:fetch',message:'video blob loaded',data:{bytes:blob.size,type:blob.type},timestamp:Date.now(),hypothesisId:'H1'})}).catch(()=>{});
-          // #endregion
         }
       } catch (err) {
         console.error('[VideoPlayer] Failed to fetch video:', err);
@@ -233,12 +230,7 @@ export function VideoPlayer({ videoUrl, autoPlay = false }: VideoPlayerProps) {
           type="video/mp4"
           onTimeUpdate={handleTimeUpdate}
           onLoadedMetadata={handleLoadedMetadata}
-          onError={() => {
-            setVideoError(true);
-            // #region agent log
-            fetch('http://127.0.0.1:7349/ingest/b5b03500-6997-4666-8a59-a196e0f10b38',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'743c18'},body:JSON.stringify({sessionId:'743c18',location:'VideoPlayer.tsx:onError',message:'video element error',data:{videoUrl:videoUrl.slice(0,80)},timestamp:Date.now(),hypothesisId:'H1'})}).catch(()=>{});
-            // #endregion
-          }}
+          onError={() => setVideoError(true)}
           className="w-full aspect-video object-contain"
           onClick={togglePlayPause}
           playsInline

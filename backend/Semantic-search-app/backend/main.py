@@ -881,7 +881,6 @@ def process_video_workflow(
 
                     history_data = {
                         "user_id": user_id,
-                        "job_id": job_id,
                         "video_id": job_id,
                         "module": "summarization",
                         "input_type": "url" if provided_srt_path else "file",
@@ -938,7 +937,7 @@ def upload_via_url(payload: UploadUrlRequest):
         try:
             # Find latest completed/processing job for this URL
             existing = supabase.table("processing_history")\
-                .select("job_id, status")\
+                .select("video_id, status")\
                 .eq("user_id", payload.user_id)\
                 .eq("input_url", payload.url)\
                 .in_("status", ["completed", "processing"])\
@@ -947,7 +946,7 @@ def upload_via_url(payload: UploadUrlRequest):
                 .execute()
             
             if existing.data and len(existing.data) > 0:
-                old_job_id = existing.data[0]["job_id"]
+                old_job_id = existing.data[0]["video_id"]
                 # Verify we actually have the data
                 ve = supabase.table("video_embeddings").select("*").eq("job_id", old_job_id).limit(1).execute()
                 if ve.data and len(ve.data) > 0:
@@ -971,7 +970,6 @@ def upload_via_url(payload: UploadUrlRequest):
                                  pass
                              history_data = {
                                 "user_id": payload.user_id,
-                                "job_id": old_job_id,
                                 "video_id": old_job_id,
                                 "module": "summarization",
                                 "input_type": "url",
@@ -1729,7 +1727,6 @@ async def upload_and_search(
                         pass
                     supabase.table("processing_history").insert({
                         "user_id": user_id,
-                        "job_id": job_id,
                         "video_id": job_id,
                         "module": "summarization",
                         "input_type": "file",
@@ -2822,7 +2819,6 @@ async def compress_video(
                     pass
                 supabase.table("processing_history").insert({
                     "user_id":    user_id,
-                    "job_id":     job_id,
                     "video_id":   job_id,
                     "module":     "compression",
                     "input_type": "file",
@@ -2988,12 +2984,24 @@ async def anonymize_video_endpoint(
                 )
                 supabase.table("processing_history").insert({
                     "user_id": user_id,
+                    "video_id": job_id,
                     "module": "blurring",
                     "input_type": "file",
                     "input_url": safe_name,
                     "query": history_query,
                     "result_url": static_url,
                     "status": "completed",
+                }).execute()
+                supabase.table("user_videos").upsert({
+                    "id": job_id,
+                    "user_id": user_id,
+                    "title": f"Anonymized: {safe_name}",
+                    "original_filename": safe_name,
+                    "video_url": static_url,
+                    "file_size": int(output_path.stat().st_size),
+                    "duration": float(stats.get("video_duration_sec", 0)),
+                    "status": "completed",
+                    "metadata": {"module": "blurring"},
                 }).execute()
             except Exception as e:
                 print("Supabase persistence failed for blurring job:", e)

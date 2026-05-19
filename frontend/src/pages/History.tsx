@@ -38,7 +38,9 @@ export default function History() {
     query?: string | null;
     status: string;
     module?: string | null;
-    job_id?: string | null;
+    video_id?: string | null;
+    result_url?: string | null;
+    input_url?: string | null;
     video?: VideoMeta | null;
   };
   const [items, setItems] = useState<HistoryItem[]>([]);
@@ -50,21 +52,30 @@ export default function History() {
   const navigate = useNavigate();
 
   const fetchHistory = useCallback(async () => {
-    if (!user?.id) return;
+    if (!user?.id) {
+      setItems([]);
+      setLoading(false);
+      return;
+    }
     setLoading(true);
     try {
       let sel = supabase
         .from('processing_history')
-        .select('id,created_at,query,status,job_id,module')
+        .select('id,created_at,query,status,video_id,module,result_url,input_url,input_type')
         .eq('user_id', user.id)
         .order('created_at', { ascending: false })
         .range((page - 1) * pageSize, (page * pageSize) - 1);
       if (search.trim()) {
-        sel = sel.or(`query.ilike.%${search.trim()}%,job_id.eq.${search.trim()}`);
+        sel = sel.or(`query.ilike.%${search.trim()}%,input_url.ilike.%${search.trim()}%`);
       }
       const { data: rows, error } = await sel;
+      // #region agent log
+      fetch('http://127.0.0.1:7349/ingest/b5b03500-6997-4666-8a59-a196e0f10b38',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'743c18'},body:JSON.stringify({sessionId:'743c18',location:'History.tsx:fetch',message:'history query',data:{userId:user.id,rowCount:rows?.length??0,error:error?.message,code:error?.code},timestamp:Date.now(),hypothesisId:'H1'})}).catch(()=>{});
+      // #endregion
       if (error) throw error;
-      const vids: string[] = Array.from(new Set((rows || []).map((r: any) => r.job_id).filter(Boolean))).map(String);
+      const vids: string[] = Array.from(
+        new Set((rows || []).map((r: { video_id?: string | null }) => r.video_id).filter(Boolean))
+      ).map(String);
       const vmeta: Record<string, VideoMeta> = {};
       if (vids.length > 0) {
         // Query both tables and merge - user_videos is primary for all, video_embeddings for search
@@ -104,20 +115,49 @@ export default function History() {
           };
         }
       }
-      const items: HistoryItem[] = (rows || []).map((r: any) => ({
-        id: r.id,
-        created_at: r.created_at,
-        query: r.query,
-        status: r.status,
-        module: r.module,
-        job_id: r.job_id,
-        video: vmeta[r.job_id] || null,
-      }));
+      const items: HistoryItem[] = (rows || []).map((r: {
+        id: string;
+        created_at: string;
+        query?: string | null;
+        status: string;
+        module?: string | null;
+        video_id?: string | null;
+        result_url?: string | null;
+        input_url?: string | null;
+      }) => {
+        const vid = r.video_id || null;
+        const meta = vid ? vmeta[vid] : null;
+        return {
+          id: r.id,
+          created_at: r.created_at,
+          query: r.query,
+          status: r.status,
+          module: r.module,
+          video_id: vid,
+          result_url: r.result_url,
+          input_url: r.input_url,
+          video: meta
+            ? meta
+            : r.result_url
+              ? {
+                  id: vid || r.id,
+                  title: r.input_url || undefined,
+                  video_url: r.result_url,
+                }
+              : null,
+        };
+      });
 
-      console.log("items", items)
+      // #region agent log
+      fetch('http://127.0.0.1:7349/ingest/b5b03500-6997-4666-8a59-a196e0f10b38',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'743c18'},body:JSON.stringify({sessionId:'743c18',location:'History.tsx:mapped',message:'history mapped',data:{rowCount:(rows||[]).length,itemCount:items.length,vidsCount:vids.length,withResultUrl:(rows||[]).filter((r:{result_url?:string|null})=>r.result_url).length},timestamp:Date.now(),hypothesisId:'H3'})}).catch(()=>{});
+      // #endregion
+
       setItems(items);
     } catch (e) {
       console.error('Error fetching history:', e);
+      // #region agent log
+      fetch('http://127.0.0.1:7349/ingest/b5b03500-6997-4666-8a59-a196e0f10b38',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'743c18'},body:JSON.stringify({sessionId:'743c18',location:'History.tsx:catch',message:'history fetch failed',data:{error:String(e)},timestamp:Date.now(),hypothesisId:'H1'})}).catch(()=>{});
+      // #endregion
       setItems([]);
     } finally {
       setLoading(false);
@@ -206,7 +246,8 @@ export default function History() {
               const Icon = moduleIcons[item.module as keyof typeof moduleIcons];
               const gradient = moduleColors[item.module as keyof typeof moduleColors];
               const v = item.video as VideoMeta | undefined;
-              const title = v?.original_filename || 'Video';
+              const title =
+                v?.title || v?.original_filename || item.input_url || item.module || 'Processed video';
               const thumb = (v?.thumbnail_url as string | undefined) || undefined;
               const dur = v?.duration || 0;
 
@@ -246,11 +287,11 @@ export default function History() {
                         )}
                         
                         <div className="flex flex-col sm:flex-row gap-2">
-                          {item.module !== 'compression' ? (
+                          {item.module === 'summarization' ? (
                             <Button
                               size="sm"
                               onClick={() => {
-                                const vid = v?.id || item.job_id;
+                                const vid = v?.id || item.video_id;
                                 if (vid) navigate(`/video/${vid}?q=${encodeURIComponent(item.query || '')}`);
                               }}
                               className="gradient-primary w-full sm:w-auto"
@@ -262,11 +303,12 @@ export default function History() {
                             <Button
                               size="sm"
                               onClick={async () => {
-                                if (!v?.video_url) return;
                                 const API_BASE = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8040';
-                                const downloadUrl = v.video_url.startsWith('http') 
-                                  ? v.video_url 
-                                  : `${API_BASE}${v.video_url}`;
+                                const rel = v?.video_url || item.result_url || '';
+                                if (!rel) return;
+                                const downloadUrl = rel.startsWith('http')
+                                  ? rel
+                                  : `${API_BASE}${rel}`;
                                 try {
                                   const resp = await fetch(downloadUrl, {
                                     headers: { 'ngrok-skip-browser-warning': 'true' },
@@ -276,7 +318,7 @@ export default function History() {
                                   const blobUrl = URL.createObjectURL(blob);
                                   const link = document.createElement('a');
                                   link.href = blobUrl;
-                                  link.download = v.video_url.split('/').pop() || 'video.mp4';
+                                  link.download = rel.split('/').pop() || 'video.mp4';
                                   document.body.appendChild(link);
                                   link.click();
                                   document.body.removeChild(link);
@@ -292,7 +334,7 @@ export default function History() {
                             </Button>
                           )}
 
-                          {v?.video_url && item.module !== 'compression' && (
+                          {v?.video_url && item.module === 'summarization' && (
                             <Button
                               size="sm"
                               variant="outline"

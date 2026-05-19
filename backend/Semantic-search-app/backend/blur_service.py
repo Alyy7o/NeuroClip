@@ -31,27 +31,6 @@ _ENGINE: Optional["BlurEngine"] = None
 DEFAULT_MATCH_THRESHOLD = float(os.getenv("BLUR_MATCH_THRESHOLD", "0.78"))
 
 
-def _agent_debug_log(location: str, message: str, data: dict, hypothesis_id: str) -> None:
-    # #region agent log
-    try:
-        log_path = Path(__file__).resolve().parents[3] / "debug-743c18.log"
-        import json
-
-        payload = {
-            "sessionId": "743c18",
-            "timestamp": int(time.time() * 1000),
-            "location": location,
-            "message": message,
-            "data": data,
-            "hypothesisId": hypothesis_id,
-        }
-        with log_path.open("a", encoding="utf-8") as f:
-            f.write(json.dumps(payload) + "\n")
-    except Exception:
-        pass
-    # #endregion
-
-
 def _resolve_ffmpeg() -> Optional[str]:
     ff = shutil.which("ffmpeg")
     if ff:
@@ -93,21 +72,9 @@ def _transcode_for_browser(src: Path, dst: Path) -> bool:
     try:
         timeout_sec = int(os.getenv("BLUR_FFMPEG_TIMEOUT", "1800"))
         proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout_sec)
-        ok = proc.returncode == 0 and dst.exists() and dst.stat().st_size > 0
-        _agent_debug_log(
-            "blur_service.py:_transcode_for_browser",
-            "ffmpeg transcode",
-            {"ok": ok, "returncode": proc.returncode, "dst_size": dst.stat().st_size if dst.exists() else 0},
-            "H1",
-        )
-        return ok
+        return proc.returncode == 0 and dst.exists() and dst.stat().st_size > 0
     except Exception as exc:
-        _agent_debug_log(
-            "blur_service.py:_transcode_for_browser",
-            "ffmpeg failed",
-            {"error": str(exc)},
-            "H1",
-        )
+        logger.warning("[blur] FFmpeg transcode failed: %s", exc)
         return False
 
 

@@ -238,11 +238,13 @@ export default function Blurring() {
       const videoDurationSec = Number(data.video_duration_sec ?? 0);
 
       if (historyId && user?.id) {
+        const blurJobId = (data.job_id as string) || undefined;
         await supabase
           .from('processing_history')
           .update({
             status: 'completed',
             result_url: relUrl,
+            ...(blurJobId ? { video_id: blurJobId } : {}),
           })
           .eq('id', historyId);
       }

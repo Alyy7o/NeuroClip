@@ -130,9 +130,6 @@ export default function Blurring() {
           query: queryWithTime,
         });
         historyId = hid;
-        // #region agent log
-        fetch('http://127.0.0.1:7349/ingest/b5b03500-6997-4666-8a59-a196e0f10b38',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'743c18'},body:JSON.stringify({sessionId:'743c18',location:'Blurring.tsx:historyStart',message:'history insert',data:{historyId:hid,error:histErr},timestamp:Date.now(),hypothesisId:'H5',runId:'post-fix'})}).catch(()=>{});
-        // #endregion
         if (histErr) console.warn('History insert failed:', histErr);
       }
 
@@ -249,9 +246,6 @@ export default function Blurring() {
           fileSize: file.size,
           module: 'blurring',
         });
-        // #region agent log
-        fetch('http://127.0.0.1:7349/ingest/b5b03500-6997-4666-8a59-a196e0f10b38',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'743c18'},body:JSON.stringify({sessionId:'743c18',location:'Blurring.tsx:historyComplete',message:'history complete',data:{historyId,blurJobId,error:completeErr},timestamp:Date.now(),hypothesisId:'H6',runId:'post-fix'})}).catch(()=>{});
-        // #endregion
         if (completeErr) console.warn('History update failed:', completeErr);
       }
 

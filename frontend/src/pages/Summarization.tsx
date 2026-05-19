@@ -150,26 +150,58 @@ export default function Summarization() {
               reject(new Error('Job failed on server'));
             }
           };
-          xhr.onerror = () => reject(new Error('Network error'));
+          xhr.onerror = () => reject(new Error('Failed to fetch'));
+          xhr.ontimeout = () => reject(new Error('Upload timed out'));
+          xhr.timeout = 0;
           xhr.open('POST', `${API_BASE}/upload-and-search`);
           xhr.setRequestHeader('ngrok-skip-browser-warning', 'true');
           xhr.send(formData);
         });
 
-        const stepInterval = setInterval(() => {
-          setCurrentStep(prev => {
-            if (prev >= 1 && prev < summarizationSteps.length - 1) return prev + 1;
-            return prev;
-          });
-        }, 8000);
-
         const uploadData = await uploadPromise;
-        clearInterval(stepInterval);
+        // #region agent log
+        fetch('http://127.0.0.1:7349/ingest/b5b03500-6997-4666-8a59-a196e0f10b38',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'743c18'},body:JSON.stringify({sessionId:'743c18',location:'Summarization.tsx:upload',message:'upload-and-search ack',data:{status:uploadData?.status,jobId:uploadData?.job_id,hasResults:!!uploadData?.results},timestamp:Date.now(),hypothesisId:'H2'})}).catch(()=>{});
+        // #endregion
+
+        let finalData = uploadData;
+        if (uploadData?.status === 'processing' && uploadData?.job_id && !uploadData?.results) {
+          const jobId = uploadData.job_id as string;
+          const pollInterval = 3000;
+          const maxPolls = 3600;
+          for (let i = 0; i < maxPolls; i++) {
+            await new Promise((r) => setTimeout(r, pollInterval));
+            const statusResp = await fetch(`${API_BASE}/summarize-status/${jobId}`, {
+              headers: { 'ngrok-skip-browser-warning': 'true' },
+            });
+            if (!statusResp.ok) {
+              throw new Error('Lost connection to summarization job');
+            }
+            const statusData = await statusResp.json();
+            const progress = Number(statusData.progress ?? 0);
+            if (progress >= 10) setCurrentStep(1);
+            if (progress >= 40) setCurrentStep(2);
+            if (progress >= 75) setCurrentStep(3);
+            // #region agent log
+            if (i % 10 === 0) fetch('http://127.0.0.1:7349/ingest/b5b03500-6997-4666-8a59-a196e0f10b38',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'743c18'},body:JSON.stringify({sessionId:'743c18',location:'Summarization.tsx:poll',message:'summarize poll',data:{jobId,status:statusData.status,progress,msg:statusData.message},timestamp:Date.now(),hypothesisId:'H3'})}).catch(()=>{});
+            // #endregion
+            if (statusData.status === 'completed') {
+              finalData = statusData;
+              break;
+            }
+            if (statusData.status === 'failed') {
+              throw new Error(statusData.error || statusData.message || 'Summarization failed');
+            }
+          }
+          if (finalData?.status !== 'completed') {
+            throw new Error('Processing timed out. Try a shorter video or trim the clip.');
+          }
+        }
+
         setCurrentStep(summarizationSteps.length - 1);
 
-        const clips = (uploadData.results || []).map((c: any) => ({
+        const clips = (finalData.results || []).map((c: ClipItem & { clip_url: string }) => ({
           ...c,
-          clip_url: c.clip_url.startsWith('http') ? c.clip_url : `${API_BASE}${c.clip_url}`,
+          clip_url: c.clip_url?.startsWith('http') ? c.clip_url : `${API_BASE}${c.clip_url}`,
         }));
 
         setResult({
@@ -178,7 +210,7 @@ export default function Summarization() {
           duration: endTime - startTime,
           originalDuration: endTime,
           clips,
-          topicExplanation: uploadData.topic_explanation,
+          topicExplanation: finalData.topic_explanation,
         });
       } else if (url) {
         setCurrentStep(1); // Skip "Uploading" step — server downloads the video directly

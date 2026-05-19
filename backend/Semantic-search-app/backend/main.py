@@ -23,7 +23,7 @@ BASE_DIR = Path(__file__).resolve().parent
 REPO_ROOT = BASE_DIR.parents[1]
 
 # --- App Initialization ---
-API_BUILD_ID = "2026-05-blur-v1"
+API_BUILD_ID = "2026-05-summarize-async-v1"
 app = FastAPI()
 
 
@@ -598,6 +598,7 @@ def process_video_workflow(
         try:
             from ocr_utils import extract_all_video_frames, run_ocr_on_frames as ocr_run
             frames_dir = output_dir / "frames" / job_id
+            print(f"[OCR] job {job_id}: single OCR pass (parallel with transcription)")
             print(f"[OCR] Starting full-video frame extraction to {frames_dir}...")
             count = extract_all_video_frames(saved_path, frames_dir)
             if count > 0:
@@ -1539,229 +1540,81 @@ async def upload_and_search(
             status_code=400, 
             detail=f"Unsupported media type '{ext}'. Please upload audio/video (e.g., .mp3, .wav, .mp4)"
         )
-    srt_out = output_dir / f"{saved_path.stem}.srt"
-    try:
-        result = generate_transcript_from_video(
-            source=str(saved_path),
-            output_srt_path=str(srt_out),
-            language_code=None,
+    from summarize_jobs import start_summarize_job, update_job
+
+    search_params = {
+        "query": query,
+        "top_k": top_k,
+        "margin_secs": margin_secs,
+        "use_windows": use_windows,
+        "window_size": window_size,
+        "window_stride": window_stride,
+        "expand_neighbors": expand_neighbors,
+        "min_clip_secs": min_clip_secs,
+        "max_clip_secs": max_clip_secs,
+        "rerank": rerank,
+    }
+
+    def _run_summarize_job() -> None:
+        print(f"[upload-and-search] job {job_id}: starting process_video_workflow (single OCR pass)")
+        update_job(job_id, message="Transcription + OCR (parallel)", progress=15)
+        wf = process_video_workflow(
+            saved_path=saved_path,
+            job_id=job_id,
+            user_id=user_id,
+            query=query,
+            original_filename=safe_name,
+            input_source=safe_name,
         )
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-    except Exception as e:
-        raise HTTPException(status_code=502, detail=f"Transcription failed: {e}")
-    # Resolve SRT text: prefer the in-result srt_text, then read from disk, then plain text
-    srt_text = result.get("srt_text") or ""
-    if not srt_text and result.get("srt_path"):
-        try:
-            srt_text = Path(str(result["srt_path"])).read_text(encoding="utf-8", errors="replace")
-        except Exception:
-            srt_text = ""
-    if not srt_text and srt_out.exists():
-        try:
-            srt_text = srt_out.read_text(encoding="utf-8", errors="replace")
-        except Exception:
-            srt_text = ""
-    if not srt_text:
-        # Last resort: use raw transcript text (non-SRT) to build a single sentence block
-        srt_text = result.get("text", "")
-    sentences = parse_srt_blocks(srt_text)
-    # If SRT parsing yielded nothing but we have plain text, synthesize a single sentence entry
-    if not sentences and result.get("text", "").strip():
-        sentences = [{
-            "sentence": result["text"].strip(),
-            "starttime": "0.00",
-            "endtime": "0.00",
-            "verbs": []
-        }]
-
-    # --- OCR: Extract text from video frames (runs on ENTIRE video) ---
-    ocr_text_data = []
-    try:
-        from ocr_utils import extract_all_video_frames, run_ocr_on_frames as ocr_run
-        frames_dir = output_dir / "frames" / job_id
-        print(f"[OCR] Starting full-video OCR extraction...")
-        frame_count = extract_all_video_frames(saved_path, frames_dir)
-        if frame_count > 0:
-            ocr_text_data = ocr_run(frames_dir)
-            print(f"[OCR] Completed: {len(ocr_text_data)} frames contained readable text")
-        else:
-            print("[OCR] No frames could be extracted from video")
-
-        # Merge OCR text into transcript sentences
-        if ocr_text_data:
-            for ocr_item in ocr_text_data:
-                ts = ocr_item["timestamp"]
-                text = ocr_item["text"]
-                best_match = None
-                best_dist = float('inf')
-                for s in sentences:
-                    s_start = float(s["starttime"])
-                    s_end = float(s["endtime"])
-                    if s_start <= ts <= s_end:
-                        best_match = s
-                        break
-                    dist = min(abs(s_start - ts), abs(s_end - ts))
-                    if dist < 5.0 and dist < best_dist:
-                        best_dist = dist
-                        best_match = s
-                if best_match is not None:
-                    best_match["sentence"] += f" [On Screen: {text}]"
-                else:
-                    sentences.append({
-                        "sentence": f"[Visual Content]: {text}",
-                        "starttime": f"{ts:.2f}",
-                        "endtime": f"{ts+2.0:.2f}",
-                        "verbs": ["visual_ocr"]
-                    })
-            sentences.sort(key=lambda x: float(x["starttime"]))
-            print(f"[OCR] Merged {len(ocr_text_data)} OCR results into transcript")
-    except Exception as e:
-        import traceback
-        print(f"[OCR ERROR] OCR in upload-and-search failed: {e}")
-        traceback.print_exc()
-
-    duration_seconds = sentences[-1]["endtime"] if sentences else "0.00"
-    if not sentences:
-        raise HTTPException(status_code=502, detail="Transcription produced no content. The video may be silent or the transcript empty.")
-    meta = build_metadata({}, srt_path=str(saved_path.with_suffix('.srt')), video_path=str(saved_path))
-    if duration_seconds and meta.get("duration") in (None, "N/A"):
-        meta["duration"] = duration_seconds
-    data = {"metadata": meta, "sentences": sentences}
-    json_path = output_dir / f"{saved_path.stem}.v4.json"
-    try:
-        json_path.write_text(json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8")
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-    try:
-        emb_vecs = [list(map(float, v)) for v in get_model().encode([s["sentence"] for s in sentences])]
-        emb = {"vectors": emb_vecs, "sentences": sentences}
-        (output_dir / f"{saved_path.stem}.embeddings.json").write_text(
-            json.dumps(emb, ensure_ascii=False),
-            encoding="utf-8",
-        )
-    except Exception as emb_err:
-        print(f"[upload-and-search] Embedding generation failed: {emb_err}")
-        import traceback; traceback.print_exc()
-    # Persist to supabase
-    try:
-        if supabase is not None:
-            if user_id:
-                meta_payload = {
-                    "id": job_id,
-                    "job_id": job_id,
-                    "user_id": user_id,
-                    "title": meta.get("title") or safe_name,
-                    "original_filename": safe_name,
-                    "video_url": str(saved_path),
-                    "file_size": int(saved_path.stat().st_size),
-                    "duration": float(meta.get("duration") or 0),
-                    "metadata": {
-                        "json_path": str(json_path),
-                        "srt_path": str(srt_out),
-                    },
-                    "status": "completed",
-                }
-                try:
-                    supabase.table("user_videos").upsert(meta_payload).execute()
-                except Exception as e:
-                    print("user_videos upsert failed:", e)
-                try:
-                    vchk = supabase.table("user_videos").select("id").eq("id", job_id).limit(1).execute()
-                    if not (vchk.data or []):
-                        print("user_videos verify missing row:", job_id)
-                except Exception as e:
-                    print("user_videos verify failed:", e)
-            try:
-                import numpy as np
-                avg_vec = np.array(emb_vecs, dtype=float).mean(axis=0).tolist() if 'emb_vecs' in locals() and emb_vecs else None
-                transcript_text = " ".join([s.get("sentence", "") for s in sentences])
-                transcript_vec = None
-                try:
-                    transcript_vec = list(map(float, get_model().encode([transcript_text])[0])) if transcript_text else None
-                except Exception:
-                    transcript_vec = None
-                ve_row = {
-                    "job_id": job_id,
-                    "video_url": str(saved_path),
-                    "title": meta.get("title") or safe_name,
-                    "description": None,
-                    "duration": int(float(meta.get("duration") or 0)),
-                    "thumbnail_url": None,
-                    "transcript": transcript_text or None,
-                    "transcript_id": result.get("id", "") or None,
-                    "video_embedding": avg_vec,
-                    "transcript_embedding": transcript_vec,
-                    "audio_url": None,
-                    "frames_path": None,
-                }
-                supabase.table("video_embeddings").insert(ve_row).execute()
-            except Exception:
-                pass
-            try:
-                emb_rows = []
-                for idx, s in enumerate(sentences):
-                    emb_rows.append({
-                        "job_id": job_id,
-                        "sentence_index": idx,
-                        "text": s.get("sentence"),
-                        "start": float(s.get("starttime", 0)),
-                        "end": float(s.get("endtime", 0)),
-                        "embedding": [float(x) for x in emb_vecs[idx]] if 'emb_vecs' in locals() else None,
-                    })
-                if emb_rows:
-                    batch = 200
-                    for i in range(0, len(emb_rows), batch):
-                        try:
-                            supabase.table("video_sentence_embeddings").insert(emb_rows[i:i+batch]).execute()
-                        except Exception:
-                            pass
-            except Exception:
-                pass
-            if user_id:
-                try:
-                    # Ensure profile exists
-                    try:
-                        supabase.table("profiles").upsert({"id": user_id}, on_conflict="id").execute()
-                    except Exception:
-                        pass
-                    supabase.table("processing_history").insert({
-                        "user_id": user_id,
-                        "video_id": job_id,
-                        "module": "summarization",
-                        "input_type": "file",
-                        "input_url": safe_name,
-                        "query": query,
-                        "status": "completed",
-                    }).execute()
-                except Exception:
-                    pass
-    except Exception:
-        pass
-
-    try:
-        payload = ClipSearchRequest(
-            json_path=str(json_path), 
-            job_id=job_id, 
-            query=query, 
-            top_k=top_k, 
-            margin_secs=margin_secs,
-            use_windows=use_windows,
-            window_size=window_size,
-            window_stride=window_stride,
-            expand_neighbors=expand_neighbors,
-            min_clip_secs=min_clip_secs,
-            max_clip_secs=max_clip_secs,
-            rerank=rerank
-        )
+        json_path = wf.get("json_path")
+        if not json_path:
+            raise RuntimeError("Pipeline did not produce json_path")
+        update_job(job_id, message="Semantic clip search", progress=85)
+        payload = ClipSearchRequest(json_path=str(json_path), job_id=job_id, **search_params)
         r = clips_search(payload)
-        return UploadAndSearchResponse(job_id=job_id, json_path=str(json_path), srt_path=str(srt_out), results=r["results"], count=r["count"], topic_explanation=r.get("topic_explanation", ""))
-    except HTTPException:
-        raise
-    except Exception as e:
-        import traceback
-        traceback.print_exc()
-        raise HTTPException(status_code=500, detail=f"Pipeline failed at clip search stage: {e}") 
+        update_job(
+            job_id,
+            status="completed",
+            progress=100,
+            message="Done",
+            results=r.get("results", []),
+            count=r.get("count", 0),
+            topic_explanation=r.get("topic_explanation", ""),
+            json_path=str(json_path),
+            srt_path=wf.get("srt_path"),
+        )
+        print(f"[upload-and-search] job {job_id}: completed with {r.get('count', 0)} clips")
+
+    start_summarize_job(job_id, _run_summarize_job)
+    return {
+        "job_id": job_id,
+        "status": "processing",
+        "message": "Video queued. Poll /summarize-status/{job_id} for results.",
+    }
+
+
+@app.get("/summarize-status/{job_id}")
+def summarize_status(job_id: str):
+    from summarize_jobs import get_job
+
+    job = get_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    out = {
+        "job_id": job_id,
+        "status": job.get("status", "processing"),
+        "progress": job.get("progress", 0),
+        "message": job.get("message", ""),
+        "error": job.get("error"),
+    }
+    if job.get("status") == "completed":
+        out["results"] = job.get("results", [])
+        out["count"] = job.get("count", 0)
+        out["topic_explanation"] = job.get("topic_explanation", "")
+        out["json_path"] = job.get("json_path")
+        out["srt_path"] = job.get("srt_path")
+    return out
+
 
 class DbSearchRequest(BaseModel):
     job_id: str
@@ -2304,6 +2157,7 @@ def clips_search_db(payload: DbSearchRequest):
 
 @app.get("/history")
 def get_history(user_id: str, page: int = 1, page_size: int = 20, q: Optional[str] = None, include_embeddings: bool = False):
+    """Service-role read: processing_history + user_videos (fallback when history empty)."""
     if supabase is None:
         raise HTTPException(status_code=500, detail="Supabase not configured")
     try:
@@ -2311,45 +2165,171 @@ def get_history(user_id: str, page: int = 1, page_size: int = 20, q: Optional[st
         ps = max(1, min(int(page_size), 100))
         start = (p - 1) * ps
         end = start + ps - 1
-        sel = supabase.table("processing_history").select("id,created_at,query,status,video_id,module").eq("user_id", user_id)
+
+        sel = (
+            supabase.table("processing_history")
+            .select(
+                "id,created_at,query,status,video_id,module,result_url,input_url,input_type"
+            )
+            .eq("user_id", user_id)
+            .order("created_at", desc=True)
+        )
         if q and q.strip():
+            qs = q.strip()
             try:
-                sel = sel.ilike("query", f"%{q}%")
+                sel = sel.or_(f"query.ilike.%{qs}%,input_url.ilike.%{qs}%")
             except Exception:
-                pass
-        # Use proper order signature for supabase-py (desc=True for latest first)
-        sel = sel.order("created_at", desc=True)
-        # Apply pagination window
+                sel = sel.ilike("query", f"%{qs}%")
+
         try:
             hist = sel.range(start, end).execute()
         except Exception:
-            # Fallback when range is unsupported: use limit
             hist = sel.limit(ps).execute()
         hrows = hist.data or []
-        vids = [r.get("video_id") for r in hrows if r.get("video_id")]
-        vmeta = {}
+
+        uv_sel = (
+            supabase.table("user_videos")
+            .select(
+                "id,title,original_filename,video_url,duration,created_at,status,metadata"
+            )
+            .eq("user_id", user_id)
+            .order("created_at", desc=True)
+        )
+        try:
+            uv_res = uv_sel.limit(500).execute()
+        except Exception:
+            uv_res = uv_sel.execute()
+        uv_rows = uv_res.data or []
+
+        vmeta: dict = {}
+        for r in uv_rows:
+            vid = r.get("id")
+            if not vid:
+                continue
+            meta = r.get("metadata") or {}
+            vmeta[vid] = {
+                "id": vid,
+                "title": r.get("title"),
+                "original_filename": r.get("original_filename"),
+                "video_url": r.get("video_url"),
+                "duration": r.get("duration"),
+                "metadata": meta,
+            }
+
+        vids = list(
+            {
+                *(r.get("video_id") for r in hrows if r.get("video_id")),
+                *vmeta.keys(),
+            }
+        )
         vemb = {}
-        if vids:
-            vm = supabase.table("video_embeddings").select("job_id,title,video_url,duration,transcript_embedding,video_embedding").in_("job_id", vids).execute()
+        if vids and include_embeddings:
+            vm = (
+                supabase.table("video_embeddings")
+                .select("job_id,title,video_url,duration,transcript_embedding,video_embedding")
+                .in_("job_id", vids)
+                .execute()
+            )
             for r in (vm.data or []):
-                vmeta[r.get("job_id")] = r
-            if include_embeddings:
-                for key, val in vmeta.items():
-                    vemb[key] = {"video_embedding": val.get("video_embedding"), "transcript_embedding": val.get("transcript_embedding")}
-                    _VIDEO_EMB_CACHE.put(key, vemb[key])
+                jid = r.get("job_id")
+                vmeta.setdefault(
+                    jid,
+                    {
+                        "id": jid,
+                        "title": r.get("title"),
+                        "video_url": r.get("video_url"),
+                        "duration": r.get("duration"),
+                    },
+                )
+                vemb[jid] = {
+                    "video_embedding": r.get("video_embedding"),
+                    "transcript_embedding": r.get("transcript_embedding"),
+                }
+                _VIDEO_EMB_CACHE.put(jid, vemb[jid])
+        elif vids:
+            missing = [v for v in vids if v not in vmeta]
+            if missing:
+                vm = (
+                    supabase.table("video_embeddings")
+                    .select("job_id,title,video_url,duration")
+                    .in_("job_id", missing)
+                    .execute()
+                )
+                for r in (vm.data or []):
+                    jid = r.get("job_id")
+                    vmeta.setdefault(
+                        jid,
+                        {
+                            "id": jid,
+                            "title": r.get("title"),
+                            "video_url": r.get("video_url"),
+                            "duration": r.get("duration"),
+                        },
+                    )
+
         items = []
+        seen_video_ids = set()
         for r in hrows:
             vid = r.get("video_id")
+            if vid:
+                seen_video_ids.add(vid)
+            video = vmeta.get(vid) if vid else None
+            result_url = r.get("result_url")
+            if not video and result_url:
+                video = {
+                    "id": vid or r.get("id"),
+                    "title": r.get("input_url"),
+                    "video_url": result_url,
+                }
             items.append({
                 "id": r.get("id"),
                 "created_at": r.get("created_at"),
                 "query": r.get("query"),
                 "status": r.get("status"),
                 "module": r.get("module"),
-                "video": vmeta.get(vid),
-                "embeddings": vemb.get(vid) if include_embeddings else None,
+                "video_id": vid,
+                "result_url": result_url,
+                "input_url": r.get("input_url"),
+                "video": video,
+                "embeddings": vemb.get(vid) if include_embeddings and vid else None,
             })
-        return {"items": items, "page": p, "page_size": ps, "count": len(items)}
+
+        # Fallback: show user_videos not linked in processing_history
+        for r in uv_rows:
+            vid = r.get("id")
+            if not vid or vid in seen_video_ids:
+                continue
+            meta = r.get("metadata") or {}
+            mod = meta.get("module") if isinstance(meta, dict) else None
+            if not mod:
+                mod = "blurring" if "anonym" in (r.get("title") or "").lower() else "compression"
+            items.append({
+                "id": f"uv-{vid}",
+                "created_at": r.get("created_at"),
+                "query": None,
+                "status": r.get("status") or "completed",
+                "module": mod,
+                "video_id": vid,
+                "result_url": r.get("video_url"),
+                "input_url": r.get("original_filename"),
+                "video": vmeta.get(vid),
+                "embeddings": None,
+            })
+
+        items.sort(key=lambda x: x.get("created_at") or "", reverse=True)
+        page_items = items[start : end + 1]
+
+        return {
+            "items": page_items,
+            "page": p,
+            "page_size": ps,
+            "count": len(page_items),
+            "total": len(items),
+            "sources": {
+                "processing_history": len(hrows),
+                "user_videos": len(uv_rows),
+            },
+        }
     except HTTPException:
         raise
     except Exception as e:

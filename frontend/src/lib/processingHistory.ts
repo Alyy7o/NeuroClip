@@ -2,6 +2,18 @@ import { supabase } from '@/integrations/supabase/client';
 
 type HistoryModule = 'blurring' | 'compression' | 'summarization';
 
+async function ensureProfile(userId: string): Promise<void> {
+  const { data: prof } = await supabase.from('profiles').select('id').eq('id', userId).maybeSingle();
+  if (prof?.id) return;
+  const { data: { user } } = await supabase.auth.getUser();
+  if (!user || user.id !== userId) return;
+  await supabase.from('profiles').upsert({
+    id: user.id,
+    email: user.email || `user_${userId.slice(0, 8)}@neuroclip.local`,
+    full_name: (user.user_metadata?.full_name as string) || 'NeuroClip User',
+  });
+}
+
 export async function startProcessingHistory(params: {
   userId: string;
   module: HistoryModule;
@@ -9,6 +21,7 @@ export async function startProcessingHistory(params: {
   inputUrl?: string;
   query?: string;
 }): Promise<{ historyId: string | null; error: string | null }> {
+  await ensureProfile(params.userId);
   const { data, error } = await supabase
     .from('processing_history')
     .insert({

@@ -8,6 +8,20 @@ import { supabase } from '@/integrations/supabase/client';
 import { useAuth } from '@/contexts/AuthContext';
 import { useNavigate } from 'react-router-dom';
 import { Badge } from '@/components/ui/badge';
+import {
+  downloadHistoryMedia,
+  effectiveHistoryStatus,
+  mediaFilename,
+  resolveMediaPath,
+} from '@/lib/historyMedia';
+
+const API_BASE = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8040';
+
+const moduleLabels: Record<string, string> = {
+  summarization: 'Summarization',
+  blurring: 'Blurring',
+  compression: 'Compression',
+};
 
 const moduleIcons = {
   summarization: ScissorsLineDashed,
@@ -59,105 +73,172 @@ export default function History() {
     }
     setLoading(true);
     try {
-      let sel = supabase
-        .from('processing_history')
-        .select('id,created_at,query,status,video_id,module,result_url,input_url,input_type')
-        .eq('user_id', user.id)
-        .order('created_at', { ascending: false })
-        .range((page - 1) * pageSize, (page * pageSize) - 1);
-      if (search.trim()) {
-        sel = sel.or(`query.ilike.%${search.trim()}%,input_url.ilike.%${search.trim()}%`);
-      }
-      const { data: rows, error } = await sel;
-      // #region agent log
-      fetch('http://127.0.0.1:7349/ingest/b5b03500-6997-4666-8a59-a196e0f10b38',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'743c18'},body:JSON.stringify({sessionId:'743c18',location:'History.tsx:fetch',message:'history query',data:{userId:user.id,rowCount:rows?.length??0,error:error?.message,code:error?.code},timestamp:Date.now(),hypothesisId:'H1'})}).catch(()=>{});
-      // #endregion
-      if (error) throw error;
-      const vids: string[] = Array.from(
-        new Set((rows || []).map((r: { video_id?: string | null }) => r.video_id).filter(Boolean))
-      ).map(String);
-      const vmeta: Record<string, VideoMeta> = {};
-      if (vids.length > 0) {
-        // Query both tables and merge - user_videos is primary for all, video_embeddings for search
-        const [veRes, uvRes] = await Promise.all([
-          supabase
-            .from('video_embeddings' as any)
-            .select('job_id,title,video_url,duration')
-            .in('job_id', vids)
-            .returns<any[]>(),
-          supabase
-            .from('user_videos')
-            .select('id,title,video_url,duration')
-            .in('id', vids)
-        ]);
+      const params = new URLSearchParams({
+        user_id: user.id,
+        page: String(page),
+        page_size: String(pageSize),
+      });
+      if (search.trim()) params.set('q', search.trim());
 
-        if (veRes.error) throw veRes.error;
-        if (uvRes.error) throw uvRes.error;
-
-        // Populate from video_embeddings first
-        for (const r of (veRes.data || [])) {
-          vmeta[r.job_id] = {
-            id: r.job_id,
-            title: r.title,
-            video_url: r.video_url,
-            duration: r.duration,
-          };
-        }
-
-        // Merge/Override from user_videos
-        for (const r of (uvRes.data || [])) {
-          vmeta[r.id] = {
-            ...(vmeta[r.id] || {}),
-            id: r.id,
-            title: r.title || vmeta[r.id]?.title,
-            video_url: r.video_url || vmeta[r.id]?.video_url,
-            duration: r.duration || vmeta[r.id]?.duration,
-          };
-        }
-      }
-      const items: HistoryItem[] = (rows || []).map((r: {
-        id: string;
-        created_at: string;
-        query?: string | null;
-        status: string;
-        module?: string | null;
-        video_id?: string | null;
-        result_url?: string | null;
-        input_url?: string | null;
-      }) => {
-        const vid = r.video_id || null;
-        const meta = vid ? vmeta[vid] : null;
-        return {
-          id: r.id,
-          created_at: r.created_at,
-          query: r.query,
-          status: r.status,
-          module: r.module,
-          video_id: vid,
-          result_url: r.result_url,
-          input_url: r.input_url,
-          video: meta
-            ? meta
-            : r.result_url
-              ? {
-                  id: vid || r.id,
-                  title: r.input_url || undefined,
-                  video_url: r.result_url,
-                }
-              : null,
-        };
+      const apiUrl = `${API_BASE}/history?${params}`;
+      const resp = await fetch(apiUrl, {
+        headers: { 'ngrok-skip-browser-warning': 'true' },
       });
 
-      // #region agent log
-      fetch('http://127.0.0.1:7349/ingest/b5b03500-6997-4666-8a59-a196e0f10b38',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'743c18'},body:JSON.stringify({sessionId:'743c18',location:'History.tsx:mapped',message:'history mapped',data:{rowCount:(rows||[]).length,itemCount:items.length,vidsCount:vids.length,withResultUrl:(rows||[]).filter((r:{result_url?:string|null})=>r.result_url).length},timestamp:Date.now(),hypothesisId:'H3'})}).catch(()=>{});
-      // #endregion
+      let items: HistoryItem[] = [];
+      let usedApi = false;
+
+      const contentType = resp.headers.get('content-type') || '';
+      let body: { items?: unknown[]; sources?: Record<string, number> } | null = null;
+      if (resp.ok && contentType.includes('application/json')) {
+        try {
+          body = await resp.json();
+        } catch {
+          body = null;
+        }
+      }
+
+      if (body && Array.isArray(body.items)) {
+        usedApi = true;
+        items = (body.items || []).map((r: {
+          id: string;
+          created_at: string;
+          query?: string | null;
+          status: string;
+          module?: string | null;
+          video_id?: string | null;
+          result_url?: string | null;
+          input_url?: string | null;
+          video?: VideoMeta | null;
+        }) => {
+          const resultUrl = r.result_url ?? null;
+          const video = r.video ?? (resultUrl
+            ? { id: r.video_id || r.id, title: r.input_url || undefined, video_url: resultUrl }
+            : null);
+          return {
+            id: r.id,
+            created_at: r.created_at,
+            query: r.query,
+            status: effectiveHistoryStatus(
+              r.status,
+              video && 'status' in video ? (video as { status?: string }).status : null,
+              !!(resultUrl || video?.video_url)
+            ),
+            module: r.module,
+            video_id: r.video_id ?? null,
+            result_url: resultUrl,
+            input_url: r.input_url ?? null,
+            video,
+          };
+        });
+      }
+
+      if (!usedApi) {
+        // Direct DB: user_videos + processing_history (Supabase client + RLS)
+        let sel = supabase
+          .from('processing_history')
+          .select('id,created_at,query,status,video_id,module,result_url,input_url,input_type')
+          .eq('user_id', user.id)
+          .order('created_at', { ascending: false })
+          .range((page - 1) * pageSize, page * pageSize - 1);
+        if (search.trim()) {
+          sel = sel.or(`query.ilike.%${search.trim()}%,input_url.ilike.%${search.trim()}%`);
+        }
+        const { data: uvRows, error: uvErr } = await supabase
+          .from('user_videos')
+          .select('id,title,original_filename,video_url,duration,created_at,status,metadata')
+          .eq('user_id', user.id)
+          .order('created_at', { ascending: false })
+          .limit(100);
+        if (uvErr) throw uvErr;
+
+        const { data: rows, error } = await sel;
+        if (error) throw error;
+
+        const vmeta: Record<string, VideoMeta> = {};
+        const seen = new Set<string>();
+
+        for (const r of uvRows || []) {
+          vmeta[r.id] = {
+            id: r.id,
+            title: r.title,
+            original_filename: r.original_filename,
+            video_url: r.video_url,
+            duration: r.duration ?? undefined,
+          };
+          const meta = (r.metadata as { module?: string } | null) ?? {};
+          const mod =
+            meta.module ||
+            (r.title?.toLowerCase().includes('anonym') ? 'blurring' : 'compression');
+          items.push({
+            id: `uv-${r.id}`,
+            created_at: r.created_at,
+            query: null,
+            status: effectiveHistoryStatus(null, r.status, !!r.video_url),
+            module: mod,
+            video_id: r.id,
+            result_url: r.video_url,
+            input_url: r.original_filename,
+            video: vmeta[r.id],
+          });
+          seen.add(r.id);
+        }
+
+        for (const r of rows || []) {
+          const vid = r.video_id || null;
+          if (vid && seen.has(vid)) {
+            const existing = items.find((i) => i.video_id === vid);
+            if (existing) {
+              existing.id = r.id;
+              existing.query = r.query ?? existing.query;
+              existing.module = r.module || existing.module;
+              existing.result_url = r.result_url || existing.result_url;
+              existing.input_url = r.input_url || existing.input_url;
+              if (vid && vmeta[vid]) existing.video = vmeta[vid];
+              const hasMedia = !!(
+                existing.result_url ||
+                existing.video?.video_url
+              );
+              existing.status = effectiveHistoryStatus(
+                r.status,
+                existing.status,
+                hasMedia
+              );
+            }
+            continue;
+          }
+          if (vid) seen.add(vid);
+          const resultUrl = r.result_url;
+          const videoMeta = vid
+            ? vmeta[vid]
+            : resultUrl
+              ? { id: vid || r.id, title: r.input_url || undefined, video_url: resultUrl }
+              : null;
+          const uvRow = vid ? (uvRows || []).find((u) => u.id === vid) : undefined;
+          items.push({
+            id: r.id,
+            created_at: r.created_at,
+            query: r.query,
+            status: effectiveHistoryStatus(
+              r.status,
+              uvRow?.status,
+              !!(resultUrl || videoMeta?.video_url)
+            ),
+            module: r.module,
+            video_id: vid,
+            result_url: resultUrl,
+            input_url: r.input_url,
+            video: videoMeta,
+          });
+        }
+        items.sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
+        const start = (page - 1) * pageSize;
+        items = items.slice(start, start + pageSize);
+      }
 
       setItems(items);
     } catch (e) {
       console.error('Error fetching history:', e);
-      // #region agent log
-      fetch('http://127.0.0.1:7349/ingest/b5b03500-6997-4666-8a59-a196e0f10b38',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'743c18'},body:JSON.stringify({sessionId:'743c18',location:'History.tsx:catch',message:'history fetch failed',data:{error:String(e)},timestamp:Date.now(),hypothesisId:'H1'})}).catch(()=>{});
-      // #endregion
       setItems([]);
     } finally {
       setLoading(false);
@@ -243,13 +324,20 @@ export default function History() {
         ) : (
           <div className="grid gap-4">
             {items.map((item, index) => {
-              const Icon = moduleIcons[item.module as keyof typeof moduleIcons];
-              const gradient = moduleColors[item.module as keyof typeof moduleColors];
+              const mod = (item.module || 'blurring') as keyof typeof moduleIcons;
+              const Icon = moduleIcons[mod] || FileVideo;
+              const gradient = moduleColors[mod] || moduleColors.blurring;
               const v = item.video as VideoMeta | undefined;
-              const title =
-                v?.title || v?.original_filename || item.input_url || item.module || 'Processed video';
+              const fileLabel =
+                v?.original_filename || item.input_url || v?.title;
+              const title = fileLabel
+                ? `${moduleLabels[item.module || ''] || item.module || 'Job'} · ${fileLabel}`
+                : moduleLabels[item.module || ''] || item.module || 'Processed video';
               const thumb = (v?.thumbnail_url as string | undefined) || undefined;
-              const dur = v?.duration || 0;
+              const dur =
+                v?.duration && v.duration > 0 ? Math.round(v.duration) : null;
+              const mediaPath = resolveMediaPath(item.result_url, v?.video_url);
+              const canDownload = !!mediaPath && item.status === 'completed';
 
               return (
                 <motion.div
@@ -270,7 +358,10 @@ export default function History() {
                               <CardTitle className="text-base sm:text-lg">{title}</CardTitle>
                               <CardDescription className="flex items-center gap-1.5 sm:gap-2 mt-1 text-xs sm:text-sm">
                                 <Calendar className="h-3 w-3 flex-shrink-0" />
-                                <span className="truncate">{formatDate(item.created_at)} • {dur}s</span>
+                                <span className="truncate">
+                                  {formatDate(item.created_at)}
+                                  {dur != null ? ` · ${dur}s` : ''}
+                                </span>
                               </CardDescription>
                             </div>
                           </div>
@@ -286,8 +377,8 @@ export default function History() {
                           <img src={thumb} alt="thumbnail" className="w-full max-w-sm rounded-md border border-border" />
                         )}
                         
-                        <div className="flex flex-col sm:flex-row gap-2">
-                          {item.module === 'summarization' ? (
+                        <div className="flex flex-col sm:flex-row flex-wrap gap-2">
+                          {item.module === 'summarization' && (
                             <Button
                               size="sm"
                               onClick={() => {
@@ -299,74 +390,25 @@ export default function History() {
                               <Play className="h-4 w-4 mr-1" />
                               <span>Open Video</span>
                             </Button>
-                          ) : (
+                          )}
+                          {canDownload && mediaPath && (
                             <Button
                               size="sm"
-                              onClick={async () => {
-                                const API_BASE = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8040';
-                                const rel = v?.video_url || item.result_url || '';
-                                if (!rel) return;
-                                const downloadUrl = rel.startsWith('http')
-                                  ? rel
-                                  : `${API_BASE}${rel}`;
-                                try {
-                                  const resp = await fetch(downloadUrl, {
-                                    headers: { 'ngrok-skip-browser-warning': 'true' },
-                                  });
-                                  if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-                                  const blob = await resp.blob();
-                                  const blobUrl = URL.createObjectURL(blob);
-                                  const link = document.createElement('a');
-                                  link.href = blobUrl;
-                                  link.download = rel.split('/').pop() || 'video.mp4';
-                                  document.body.appendChild(link);
-                                  link.click();
-                                  document.body.removeChild(link);
-                                  URL.revokeObjectURL(blobUrl);
-                                } catch {
-                                  window.open(downloadUrl, '_blank');
-                                }
-                              }}
-                              className="gradient-primary w-full sm:w-auto"
+                              variant={item.module === 'summarization' ? 'outline' : 'default'}
+                              className={
+                                item.module === 'summarization'
+                                  ? 'w-full sm:w-auto'
+                                  : 'gradient-primary w-full sm:w-auto'
+                              }
+                              onClick={() =>
+                                downloadHistoryMedia(
+                                  mediaPath,
+                                  mediaFilename(mediaPath, fileLabel || 'video.mp4')
+                                )
+                              }
                             >
                               <Download className="h-4 w-4 mr-1" />
                               <span>Download Video</span>
-                            </Button>
-                          )}
-
-                          {v?.video_url && item.module === 'summarization' && (
-                            <Button
-                              size="sm"
-                              variant="outline"
-                              onClick={async () => {
-                                const API_BASE = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8040';
-                                const filename = v.video_url?.split(/[/\\]/).pop();
-                                if (!filename) return;
-                                
-                                const path = v.video_url?.includes('uploads') ? `uploads/${filename}` : `clips/${filename}`;
-                                const downloadUrl = `${API_BASE}/download?path=${path}`;
-                                try {
-                                  const resp = await fetch(downloadUrl, {
-                                    headers: { 'ngrok-skip-browser-warning': 'true' },
-                                  });
-                                  if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-                                  const blob = await resp.blob();
-                                  const blobUrl = URL.createObjectURL(blob);
-                                  const link = document.createElement('a');
-                                  link.href = blobUrl;
-                                  link.download = filename || 'video.mp4';
-                                  document.body.appendChild(link);
-                                  link.click();
-                                  document.body.removeChild(link);
-                                  URL.revokeObjectURL(blobUrl);
-                                } catch {
-                                  window.open(downloadUrl, '_blank');
-                                }
-                              }}
-                              className="w-full sm:w-auto"
-                            >
-                              <Download className="h-4 w-4 mr-1" />
-                              <span>Download</span>
                             </Button>
                           )}
                         </div>
@@ -378,6 +420,20 @@ export default function History() {
                           <p className="text-muted-foreground line-clamp-2">
                             <span className="font-medium">Query:</span> {item.query}
                           </p>
+                        )}
+                        {canDownload && mediaPath && (
+                          <button
+                            type="button"
+                            className="text-sm text-primary hover:underline text-left"
+                            onClick={() =>
+                              downloadHistoryMedia(
+                                mediaPath,
+                                mediaFilename(mediaPath, fileLabel || 'video.mp4')
+                              )
+                            }
+                          >
+                            Download processed file
+                          </button>
                         )}
                       </div>
                     </CardContent>

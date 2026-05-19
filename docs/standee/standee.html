@@ -1,0 +1,566 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>NeuroClip FYP Standee</title>
+    <style>
+        /* --- STANDEE PRINTER CONFIGURATION --- */
+        @page {
+            /* 24x60 inches portrait + 0.25in bleed on all sides = 24.5 x 60.5 inches total canvas */
+            size: 24.5in 60.5in;
+            margin: 0;
+        }
+        
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+
+        body {
+            width: 24.5in;
+            height: 60.5in;
+            font-family: 'Inter', sans-serif;
+            background-color: #ffffff;
+            color: #0f172a;
+            -webkit-print-color-adjust: exact;
+            print-color-adjust: exact;
+            position: relative;
+            overflow: hidden;
+        }
+
+        /* --- TYPOGRAPHY ENGINE --- */
+        h1, h2, h3, .heading-font {
+            font-family: 'Poppins', sans-serif;
+            font-weight: 700;
+        }
+
+        /* --- BLEED & SAFETY MARGIN SYSTEM --- */
+        .bleed-container {
+            width: 24.5in;
+            height: 60.5in;
+            padding: 0.25in; /* Production Bleed Boundary */
+            background-color: #ffffff;
+        }
+
+        .safe-zone {
+            width: 24.0in;
+            height: 60.0in;
+            position: relative;
+            display: flex;
+            flex-direction: column;
+            justify-content: space-between;
+            background-color: #ffffff;
+        }
+
+        /* --- DESIGN LAYOUT BLOCKS --- */
+        .header-section {
+            width: 100%;
+            text-align: center;
+            background-color: #ffffff;
+            padding-top: 1.2in;
+            padding-bottom: 0.8in;
+            border-bottom: 4px solid #f1f5f9;
+        }
+
+        .numl-logo {
+            width: 3.2in;
+            height: 3.2in;
+            margin-bottom: 0.4in;
+            object-fit: contain;
+        }
+
+        .uni-name {
+            font-size: 44pt;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            color: #0f172a;
+            margin-bottom: 0.15in;
+        }
+
+        .campus-name {
+            font-size: 26pt;
+            font-style: italic;
+            color: #475569;
+            font-weight: 500;
+            margin-bottom: 0.1in;
+        }
+
+        .dept-name {
+            font-size: 22pt;
+            color: #64748b;
+            font-weight: 600;
+            letter-spacing: 0.5px;
+        }
+
+        /* Hero Area */
+        .hero-section {
+            background-color: #0f172a;
+            color: #ffffff;
+            padding: 1.2in 1.0in;
+            text-align: center;
+            border-radius: 24px;
+            margin: 0.5in 0.4in;
+            box-shadow: 0 20px 40px rgba(15, 23, 42, 0.15);
+        }
+
+        .project-title {
+            font-size: 76pt;
+            font-weight: 800;
+            color: #10b981; /* Vibrant Mint */
+            letter-spacing: -1px;
+            margin-bottom: 0.2in;
+            line-height: 1.1;
+        }
+
+        .project-subtitle {
+            font-size: 38pt;
+            font-weight: 600;
+            color: #ffffff;
+            margin-bottom: 0.4in;
+            letter-spacing: 0.5px;
+        }
+
+        .project-tagline {
+            font-size: 22pt;
+            font-style: italic;
+            color: #cbd5e1;
+            line-height: 1.5;
+            max-width: 90%;
+            margin: 0 auto 0.6in auto;
+        }
+
+        /* Progress Pipeline Strip */
+        .pipeline-container {
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            gap: 0.25in;
+            margin-top: 0.4in;
+        }
+
+        .pipeline-badge {
+            background-color: #1e293b;
+            border: 2px solid #334155;
+            color: #e2e8f0;
+            padding: 0.15in 0.35in;
+            border-radius: 50px;
+            font-size: 18pt;
+            font-weight: 600;
+            font-family: 'Poppins', sans-serif;
+        }
+
+        .pipeline-arrow {
+            color: #10b981;
+            font-size: 22pt;
+            font-weight: bold;
+        }
+
+        /* Body Sections Content */
+        .content-container {
+            padding: 0 0.8in;
+            flex-grow: 1;
+            display: flex;
+            flex-direction: column;
+            gap: 0.75in;
+        }
+
+        .section-block {
+            width: 100%;
+        }
+
+        .section-header {
+            display: flex;
+            align-items: center;
+            gap: 0.3in;
+            border-bottom: 3px solid #10b981;
+            padding-bottom: 0.15in;
+            margin-bottom: 0.3in;
+        }
+
+        .section-number {
+            font-size: 36pt;
+            color: #10b981;
+            font-weight: 800;
+        }
+
+        .section-title {
+            font-size: 36pt;
+            color: #0f172a;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+
+        .body-text {
+            font-size: 21pt;
+            line-height: 1.6;
+            color: #334155;
+            text-align: justify;
+        }
+
+        /* Custom Bullet List System */
+        .objective-list {
+            list-style: none;
+        }
+
+        .objective-item {
+            font-size: 21pt;
+            line-height: 1.5;
+            color: #334155;
+            margin-bottom: 0.25in;
+            position: relative;
+            padding-left: 0.5in;
+            text-align: justify;
+        }
+
+        .objective-item::before {
+            content: "➔";
+            position: absolute;
+            left: 0;
+            top: 0;
+            color: #10b981;
+            font-weight: bold;
+        }
+
+        /* Framework Methodology Steps Layout */
+        .methodology-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 0.35in;
+        }
+
+        .method-card {
+            background-color: #f8fafc;
+            border-left: 6px solid #10b981;
+            padding: 0.25in 0.3in;
+            border-radius: 0 12px 12px 0;
+        }
+
+        .method-card-title {
+            font-size: 22pt;
+            font-weight: 700;
+            color: #0f172a;
+            margin-bottom: 0.1in;
+        }
+
+        .method-card-desc {
+            font-size: 19pt;
+            line-height: 1.5;
+            color: #475569;
+        }
+
+        /* Modern Grid Technology Table Matrix */
+        .tech-matrix {
+            width: 100%;
+            border-collapse: collapse;
+            margin-top: 0.1in;
+            box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.05);
+        }
+
+        .tech-matrix td {
+            padding: 0.22in 0.3in;
+            border: 1px solid #e2e8f0;
+            font-size: 20pt;
+            vertical-align: middle;
+        }
+
+        .tech-label-cell {
+            background-color: #f1f5f9;
+            font-weight: 700;
+            color: #0f172a;
+            width: 25%;
+            font-family: 'Poppins', sans-serif;
+        }
+
+        .tech-value-cell {
+            background-color: #ffffff;
+            color: #334155;
+            line-height: 1.4;
+        }
+
+        /* App Highlights Layout Component */
+        .highlights-strip {
+            display: grid;
+            grid-template-columns: repeat(4, 1fr);
+            gap: 0.25in;
+            margin-top: -0.2in;
+        }
+
+        .highlight-box {
+            border: 2px dashed #cbd5e1;
+            border-radius: 12px;
+            padding: 0.2in;
+            text-align: center;
+            background-color: #f8fafc;
+        }
+
+        .highlight-box-title {
+            font-size: 19pt;
+            font-weight: 700;
+            color: #10b981;
+            margin-bottom: 0.05in;
+        }
+
+        .highlight-box-desc {
+            font-size: 16pt;
+            color: #64748b;
+            font-weight: 500;
+        }
+
+        /* Graphics Layout Blueprint Group */
+        .graphics-gallery {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 0.3in;
+            width: 100%;
+        }
+
+        .graphic-wrapper {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+        }
+
+        .graphic-frame {
+            width: 100%;
+            height: 4.2in;
+            border: 2px solid #e2e8f0;
+            border-radius: 12px;
+            background-color: #f8fafc;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            overflow: hidden;
+            padding: 0.1in;
+        }
+
+        .placeholder-svg {
+            width: 70%;
+            height: 70%;
+            fill: #cbd5e1;
+        }
+
+        .graphic-caption {
+            font-size: 16pt;
+            font-style: italic;
+            color: #64748b;
+            text-align: center;
+            margin-top: 0.12in;
+            line-height: 1.4;
+            padding: 0 0.1in;
+        }
+
+        /* Structured Rigid Footer Block */
+        .footer-section {
+            width: 100%;
+            background-color: #0f172a;
+            color: #ffffff;
+            text-align: center;
+            padding-top: 0.6in;
+            padding-bottom: 0.8in;
+            border-top: 6px solid #10b981;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+        }
+
+        .footer-supervisor {
+            font-size: 22pt;
+            font-weight: 500;
+            color: #94a3b8;
+            margin-bottom: 0.25in;
+            letter-spacing: 0.5px;
+        }
+
+        .footer-supervisor strong {
+            color: #ffffff;
+            font-weight: 700;
+        }
+
+        .footer-team {
+            font-size: 24pt;
+            font-weight: 700;
+            color: #ffffff;
+            font-family: 'Poppins', sans-serif;
+            margin-bottom: 0.25in;
+            letter-spacing: 0.5px;
+        }
+
+        .footer-meta {
+            font-size: 18pt;
+            color: #64748b;
+            font-weight: 500;
+            letter-spacing: 0.5px;
+        }
+    </style>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=Poppins:wght@600;700;800&display=swap" rel="stylesheet">
+</head>
+<body>
+
+    <div class="bleed-container">
+        <div class="safe-zone">
+            
+            <header class="header-section">
+                <img class="numl-logo" src="data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><circle cx='50' cy='50' r='40' stroke='%23004b87' stroke-width='6' fill='none'/><path d='M30 40 L50 25 L70 40 L70 70 L30 70 Z' fill='%23004b87'/></svg>" alt="NUML Logo [cite: 11]">
+                <h1 class="uni-name">National University of Modern Languages</h1> [cite: 11, 12]
+                <div class="campus-name">Faisalabad Campus</div> [cite: 22]
+                <div class="dept-name">Department of Computer Science</div> [cite: 31]
+            </header>
+
+            <section class="hero-section">
+                <div class="project-title">NEUROCLIP</div> [cite: 23]
+                <div class="project-subtitle">Context-Aware Video Processing</div> [cite: 23]
+                <div class="project-tagline">AI-powered semantic clip retrieval, intelligent blurring, and smart compression — all in one platform.</div>
+                
+                <div class="pipeline-container">
+                    <div class="pipeline-badge">Upload</div>
+                    <div class="pipeline-arrow">➔</div>
+                    <div class="pipeline-badge">ASR + OCR</div>
+                    <div class="pipeline-arrow">➔</div>
+                    <div class="pipeline-badge">Embed</div>
+                    <div class="pipeline-arrow">➔</div>
+                    <div class="pipeline-badge">Search</div>
+                    <div class="pipeline-arrow">➔</div>
+                    <div class="pipeline-badge">Clips</div>
+                </div>
+            </section>
+
+            <div class="content-container">
+                
+                <article class="section-block">
+                    <div class="section-header">
+                        <span class="section-number">01</span> [cite: 39]
+                        <h2 class="section-title">Project Brief</h2> [cite: 43]
+                    </div>
+                    <p class="body-text">
+                        Long-form video is hard to search: keyword search misses intent, returns fragmented snippets, and forces manual scrubbing. <strong>NeuroClip</strong> is a context-aware web platform for <strong>students, educators, and teams</strong> who need to find moments in lectures, meetings, and archives using <strong>natural language</strong>. It ingests video (upload or URL), fuses <strong>speech (ASR)</strong> and **on-screen text (OCR)**, builds semantic embeddings, and returns <strong>playable clips</strong> — with optional <strong>privacy blurring</strong> and <strong>compression</strong> for sharing.
+                    </p>
+                </article>
+
+                <article class="section-block">
+                    <div class="section-header">
+                        <span class="section-number">02</span> [cite: 40]
+                        <h2 class="section-title">Objective</h2> [cite: 46]
+                    </div>
+                    <ul class="objective-list">
+                        <li class="objective-item"><strong>Develop</strong> a multimodal pipeline that fuses ASR transcripts and frame OCR into searchable sentence-level units.</li> [cite: 47]
+                        <li class="objective-item"><strong>Implement</strong> intent-aware semantic retrieval with vector search, re-ranking, and FFmpeg-based clip extraction.</li> [cite: 47]
+                        <li class="objective-item"><strong>Design</strong> query-driven privacy redaction (faces, IDs, license plates) and codec-aware video compression modules.</li> [cite: 47]
+                        <li class="objective-item"><strong>Evaluate</strong> retrieval quality using grounded test queries (Precision@K, nDCG@K) on diverse domains.</li> [cite: 47]
+                        <li class="objective-item"><strong>Deploy</strong> a secure Progressive Web Application with authentication, processing history, and reusable job-level caching.</li> [cite: 47]
+                    </ul>
+                </article>
+
+                <article class="section-block">
+                    <div class="section-header">
+                        <span class="section-number">03</span> [cite: 41]
+                        <h2 class="section-title">Methodology</h2> [cite: 49]
+                    </div>
+                    <div class="methodology-grid">
+                        <div class="method-card">
+                            <div class="method-card-title">1. Requirements Analysis</div> [cite: 51]
+                            <div class="method-card-desc">Functional/non-functional structural mapping for localized search, automated blurring pipelines, and media transcoding codecs.</div>
+                        </div>
+                        <div class="method-card">
+                            <div class="method-card-title">2. Architectural Design</div> [cite: 51]
+                            <div class="method-card-desc">Modelling structural interactions via system level entity relationships, sequence pipelines, operations flowcharts and application layouts.</div>
+                        </div>
+                        <div class="method-card">
+                            <div class="method-card-title">3. Full-Stack Development</div> [cite: 51]
+                            <div class="method-card-desc">Assembling asynchronous Python FastAPI endpoints connected directly to PostgreSQL pgvector nodes alongside React interactive layers.</div>
+                        </div>
+                        <div class="method-card">
+                            <div class="method-card-title">4. Evaluation & Verification</div> [cite: 51]
+                            <div class="method-card-desc">Subjecting model modules to structured lookup evaluation, benchmarking verification speeds, and performing programmatic black-box coverage checks.</div>
+                        </div>
+                    </div>
+                </article>
+
+                <article class="section-block">
+                    <div class="section-header">
+                        <span class="section-number">04</span> [cite: 42]
+                        <h2 class="section-title">Tools & Technology</h2> [cite: 52]
+                    </div>
+                    <table class="tech-matrix">
+                        <tr>
+                            <td class="tech-label-cell">Frontend UI</td>
+                            <td class="tech-value-cell">React 18, TypeScript, Vite, Tailwind CSS, shadcn/ui, Framer Motion, PWA</td>
+                        </tr>
+                        <tr>
+                            <td class="tech-label-cell">Backend API</td>
+                            <td class="tech-value-cell">Python, FastAPI, Uvicorn</td>
+                        </tr>
+                        <tr>
+                            <td class="tech-label-cell">Data & Search</td>
+                            <td class="tech-value-cell">Supabase (PostgreSQL, Auth, Storage, **pgvector**)</td>
+                        </tr>
+                        <tr>
+                            <td class="tech-label-cell">AI / Pipelines</td>
+                            <td class="tech-value-cell">AssemblyAI (ASR), EasyOCR, sentence-transformers, cross-encoder, PyTorch, YOLOv8, Google Generative AI</td>
+                        </tr>
+                        <tr>
+                            <td class="tech-label-cell">Media Core</td>
+                            <td class="tech-value-cell">FFmpeg, OpenCV, MoviePy, yt-dlp</td>
+                        </tr>
+                    </table>
+                </article>
+
+                <div class="highlights-strip">
+                    <div class="highlight-box">
+                        <div class="highlight-box-title">Semantic Search</div>
+                        <div class="highlight-box-desc">Natural-language clip lookup</div>
+                    </div>
+                    <div class="highlight-box">
+                        <div class="highlight-box-title">Auto Blurring</div>
+                        <div class="highlight-box-desc">Privacy-aware tracking</div>
+                    </div>
+                    <div class="highlight-box">
+                        <div class="highlight-box-title">Compression</div>
+                        <div class="highlight-box-desc">Optimized asset rendering</div>
+                    </div>
+                    <div class="highlight-box">
+                        <div class="highlight-box-title">PWA Ecosystem</div>
+                        <div class="highlight-box-desc">Native operational utility</div>
+                    </div>
+                </div>
+
+                <section class="section-block">
+                    <div class="graphics-gallery">
+                        <div class="graphic-wrapper">
+                            <div class="graphic-frame">
+                                <svg class="placeholder-svg" viewBox="0 0 24 24"><path d="M19 3H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zm-1 16H5V5h14v14zm-4-4h-4v-2h4v2zm0-4h-4V9h4v2z"/></svg>
+                            </div>
+                            <div class="graphic-caption">Figure 1: System Architecture Blueprint — Ingest to dynamic vector extraction.</div> [cite: 95]
+                        </div>
+                        <div class="graphic-wrapper">
+                            <div class="graphic-frame">
+                                <svg class="placeholder-svg" viewBox="0 0 24 24"><path d="M4 6H2v14c0 1.1.9 2 2 2h14v-2H4V6zm16-4H8c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2zm0 14H8V4h12v12z"/></svg>
+                            </div>
+                            <div class="graphic-caption">Figure 2: Production Client GUI — Unified dashboard layout.</div> [cite: 95]
+                        </div>
+                        <div class="graphic-wrapper">
+                            <div class="graphic-frame">
+                                <svg class="placeholder-svg" viewBox="0 0 24 24"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm1 15h-2v-6h2v6zm0-8h-2V7h2v2z"/></svg>
+                            </div>
+                            <div class="graphic-caption">Figure 3: Project Architecture Domain — Operational workflow boundaries.</div> [cite: 95]
+                        </div>
+                    </div>
+                </section>
+
+            </div>
+
+            <footer class="footer-section">
+                <div class="footer-supervisor">Supervisor: <strong>Subhan Arif</strong></div> [cite: 74]
+                <div class="footer-team">Ali Javed (FC-200) &nbsp;|&nbsp; Asad Sardar (FC-211)</div> [cite: 75]
+                <div class="footer-meta">Department of Computer Science</div> [cite: 76]
+                <div class="footer-meta" style="margin-top: 5px; font-size: 15pt; color: #475569;">National University of Modern Languages, Faisalabad Campus</div>
+            </footer>
+
+        </div>
+    </div>
+
+</body>
+</html>

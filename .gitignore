@@ -40,6 +40,10 @@ Thumbs.db
 # Misc
 coverage/
 
+# FYP standee generated output
+docs/standee/standee-print.pdf
+docs/standee/node_modules/
+
 
 # backend
 

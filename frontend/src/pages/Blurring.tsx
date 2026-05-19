@@ -160,6 +160,8 @@ export default function Blurring() {
         xhr.onload = () => {
           if (xhr.status >= 200 && xhr.status < 300) {
             resolve(JSON.parse(xhr.responseText));
+          } else if (xhr.status === 413) {
+            reject(new Error('Video file too large for upload. Trim the clip or compress it first.'));
           } else if (xhr.status === 404) {
             reject(
               new Error(
@@ -190,8 +192,42 @@ export default function Blurring() {
         });
       }, 12000);
 
-      const data = await uploadPromise;
+      let data = await uploadPromise;
       clearInterval(stepInterval);
+
+      if (data.status === 'processing' && data.job_id) {
+        const jobId = data.job_id as string;
+        const pollInterval = 3000;
+        const maxPolls = 3600;
+        for (let i = 0; i < maxPolls; i++) {
+          await new Promise((r) => setTimeout(r, pollInterval));
+          const statusResp = await fetch(`${API_BASE}/anonymize-status/${jobId}`, {
+            headers: { 'ngrok-skip-browser-warning': 'true' },
+          });
+          if (!statusResp.ok) {
+            throw new Error('Lost connection to blur job status');
+          }
+          const statusData = await statusResp.json();
+          const progress = Number(statusData.progress ?? 0);
+          if (progress > 0) {
+            setUploadProgress(Math.min(99, Math.round(progress)));
+            if (progress < 30) setCurrentStep(1);
+            else if (progress < 70) setCurrentStep(2);
+            else setCurrentStep(3);
+          }
+          if (statusData.status === 'completed') {
+            data = statusData;
+            break;
+          }
+          if (statusData.status === 'failed') {
+            throw new Error(statusData.error || statusData.message || 'Anonymization failed');
+          }
+        }
+        if (data.status !== 'completed') {
+          throw new Error('Processing timed out. Try a shorter clip or use the time-range trimmer.');
+        }
+      }
+
       setCurrentStep(blurringSteps.length - 1);
 
       const relUrl = data.url as string;

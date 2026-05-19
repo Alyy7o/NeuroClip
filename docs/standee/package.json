@@ -1,0 +1,12 @@
+{
+  "name": "neuroclip-standee",
+  "private": true,
+  "type": "module",
+  "description": "Optional Puppeteer export for FYP standee PDF",
+  "scripts": {
+    "export-pdf": "node export-pdf.mjs"
+  },
+  "devDependencies": {
+    "puppeteer": "^24.0.0"
+  }
+}

@@ -2939,83 +2939,95 @@ async def anonymize_video_endpoint(
     if saved_refs == 0:
         raise HTTPException(status_code=400, detail="No reference images could be saved")
 
-    t0 = time.perf_counter()
-    try:
-        stats = anonymize_video(
-            input_path,
-            refs_dir,
-            output_path,
-            match_threshold=float(match_threshold),
-            throttle=int(throttle),
-            grace=int(grace),
-            min_match_streak=int(min_match_streak),
-            start_sec=start_sec,
-            end_sec=end_sec,
-        )
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-    except Exception as e:
-        print(f"[anonymize-video] failed: {e}")
-        raise HTTPException(status_code=500, detail=f"Anonymization failed: {e}")
-
-    if not output_path.exists():
-        raise HTTPException(status_code=500, detail="Output video was not created")
-
-    duration = time.perf_counter() - t0
-    rel_path = output_path.relative_to(REPO_ROOT / "output_data")
-    static_url = f"/static/{rel_path.as_posix()}"
     query_note = (query or "").strip()
+    from blur_jobs import get_job, start_blur_job, update_job
 
-    if supabase is not None and user_id:
+    def _run_job() -> None:
+        from blur_service import anonymize_video
+
+        def _progress(pct: float, msg: str) -> None:
+            update_job(job_id, progress=round(pct, 1), message=msg)
+
         try:
-            supabase.table("profiles").upsert({"id": user_id}, on_conflict="id").execute()
-        except Exception:
-            pass
-        try:
-            history_query = query_note or (
-                f"ref_images={saved_refs} threshold={match_threshold} "
-                f"throttle={throttle} grace={grace}"
+            update_job(job_id, message="Building face signatures", progress=2)
+            stats = anonymize_video(
+                input_path,
+                refs_dir,
+                output_path,
+                match_threshold=float(match_threshold),
+                throttle=int(throttle),
+                grace=int(grace),
+                min_match_streak=int(min_match_streak),
+                start_sec=start_sec,
+                end_sec=end_sec,
+                progress_cb=_progress,
             )
-            supabase.table("processing_history").insert({
-                "user_id": user_id,
-                "module": "blurring",
-                "input_type": "file",
-                "input_url": safe_name,
-                "query": history_query,
-                "result_url": static_url,
-                "status": "completed",
-            }).execute()
-            supabase.table("user_videos").upsert({
-                "id": job_id,
-                "user_id": user_id,
-                "title": f"Anonymized: {safe_name}",
-                "original_filename": safe_name,
-                "video_url": static_url,
-                "file_size": int(output_path.stat().st_size),
-                "duration": float(stats.get("total_frames", 0)) / max(float(stats.get("fps", 25)), 1),
-                "status": "completed",
-                "metadata": {
+        except ValueError as exc:
+            update_job(job_id, status="failed", error=str(exc), message=str(exc))
+            return
+        except Exception as exc:
+            print(f"[anonymize-video] job {job_id} failed: {exc}")
+            update_job(job_id, status="failed", error=str(exc), message="Processing failed")
+            return
+
+        if not output_path.exists():
+            update_job(job_id, status="failed", error="Output video was not created")
+            return
+
+        rel_path = output_path.relative_to(REPO_ROOT / "output_data")
+        static_url = f"/static/{rel_path.as_posix()}"
+
+        if supabase is not None and user_id:
+            try:
+                supabase.table("profiles").upsert({"id": user_id}, on_conflict="id").execute()
+            except Exception:
+                pass
+            try:
+                history_query = query_note or (
+                    f"ref_images={saved_refs} threshold={match_threshold}"
+                )
+                supabase.table("processing_history").insert({
+                    "user_id": user_id,
                     "module": "blurring",
-                    "target_ids_blurred": stats.get("target_ids_blurred"),
-                    "processing_time_sec": stats.get("processing_time_sec"),
-                    "query": query_note,
-                },
-            }).execute()
-        except Exception as e:
-            print("Supabase persistence failed for blurring job:", e)
+                    "input_type": "file",
+                    "input_url": safe_name,
+                    "query": history_query,
+                    "result_url": static_url,
+                    "status": "completed",
+                }).execute()
+            except Exception as e:
+                print("Supabase persistence failed for blurring job:", e)
+
+        update_job(
+            job_id,
+            status="completed",
+            progress=100,
+            message="Done",
+            url=static_url,
+            target_ids_blurred=int(stats.get("target_ids_blurred", 0)),
+            processing_time_sec=float(stats.get("processing_time_sec", 0)),
+            video_duration_sec=stats.get("video_duration_sec"),
+            device=stats.get("device"),
+        )
+
+    start_blur_job(job_id, _run_job)
 
     return {
         "job_id": job_id,
-        "url": static_url,
-        "target_ids_blurred": int(stats.get("target_ids_blurred", 0)),
-        "total_frames": int(stats.get("total_frames", 0)),
-        "processing_time_sec": float(stats.get("processing_time_sec", duration)),
-        "query_received": query_note,
+        "status": "processing",
+        "message": "Video queued for anonymization. Poll /anonymize-status/{job_id}.",
         "reference_images_count": saved_refs,
-        "video_duration_sec": stats.get("video_duration_sec"),
-        "match_threshold": stats.get("match_threshold"),
-        "device": stats.get("device"),
     }
+
+
+@app.get("/anonymize-status/{job_id}")
+def anonymize_status(job_id: str):
+    from blur_jobs import get_job
+
+    job = get_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    return job
 
 
 if __name__ == "__main__":

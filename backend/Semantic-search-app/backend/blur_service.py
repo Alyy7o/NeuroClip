@@ -19,7 +19,7 @@ import subprocess
 import threading
 import time
 from pathlib import Path
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Callable, Dict, List, Optional, Set, Tuple
 
 import cv2
 import numpy as np
@@ -91,7 +91,8 @@ def _transcode_for_browser(src: Path, dst: Path) -> bool:
         str(dst),
     ]
     try:
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+        timeout_sec = int(os.getenv("BLUR_FFMPEG_TIMEOUT", "1800"))
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout_sec)
         ok = proc.returncode == 0 and dst.exists() and dst.stat().st_size > 0
         _agent_debug_log(
             "blur_service.py:_transcode_for_browser",
@@ -417,6 +418,7 @@ class BlurEngine:
         min_match_streak: int = 2,
         start_sec: Optional[float] = None,
         end_sec: Optional[float] = None,
+        progress_cb: Optional[Callable[[float, str], None]] = None,
     ) -> Dict[str, object]:
         cap = cv2.VideoCapture(str(video_path))
         if not cap.isOpened():
@@ -450,13 +452,31 @@ class BlurEngine:
         min_streak = max(1, int(min_match_streak))
         use_half = "cuda" in self._device
         master_dim = int(master.shape[0])
+        duration_est = total_frames / max(fps, 1.0)
+        if duration_est > 300:
+            throttle = max(throttle, 10)
+        elif duration_est > 120:
+            throttle = max(throttle, 6)
+        elif duration_est > 60:
+            throttle = max(throttle, 4)
+
+        infer_max = int(os.getenv("BLUR_INFER_MAX_DIM", "960"))
+        last_face_boxes: Dict[int, Tuple[int, int, int, int]] = {}
+        frames_to_process = max(1, end_frame - start_frame)
+
         logger.info(
-            "[blur] match_threshold=%.2f min_streak=%d device=%s half=%s",
+            "[blur] match_threshold=%.2f min_streak=%d throttle=%d device=%s ~%.0fs video",
             match_threshold,
             min_streak,
+            throttle,
             self._device,
-            use_half,
+            duration_est,
         )
+
+        def _report_progress() -> None:
+            if progress_cb and frames_to_process > 0:
+                pct = min(99.0, (processed / frames_to_process) * 100.0)
+                progress_cb(pct, "Processing frames")
 
         while True:
             ok, frame = cap.read()
@@ -465,76 +485,122 @@ class BlurEngine:
 
             in_range = start_frame <= frame_idx < end_frame
             if in_range:
-                results = self._yolo.track(
-                    frame,
-                    persist=True,
-                    verbose=False,
-                    device=self._device,
-                    half=use_half,
-                    classes=[0],
-                    tracker=os.getenv("BLUR_TRACKER", "botsort.yaml"),
-                )
-                current_ids: Set[int] = set()
-                frame_candidates: List[Tuple[int, float]] = []
+                detect_interval = 2 if locked_targets else throttle
+                run_detect = frame_idx % detect_interval == 0
 
-                for r in results:
-                    if r.boxes is None or r.boxes.id is None:
-                        continue
-                    ids = r.boxes.id.int().cpu().tolist()
-                    xyxy = r.boxes.xyxy.cpu().numpy()
-                    for tid, box in zip(ids, xyxy):
-                        current_ids.add(tid)
-                        px1, py1, px2, py2 = map(int, box[:4])
-                        fx1, fy1, fx2, fy2 = self._person_face_region(frame, px1, py1, px2, py2)
-
-                        if tid in locked_targets:
+                if locked_targets and not run_detect:
+                    for tid in locked_targets:
+                        box = last_face_boxes.get(tid)
+                        if box:
+                            fx1, fy1, fx2, fy2 = box
                             pad = int(0.08 * max(fx2 - fx1, fy2 - fy1))
                             _gaussian_blur_roi(
                                 frame, fx1 - pad, fy1 - pad, fx2 + pad, fy2 + pad
                             )
+                elif run_detect:
+                    infer_frame = frame
+                    scale = 1.0
+                    fh, fw = frame.shape[:2]
+                    if max(fh, fw) > infer_max:
+                        scale = infer_max / max(fh, fw)
+                        infer_frame = cv2.resize(
+                            frame,
+                            (int(fw * scale), int(fh * scale)),
+                            interpolation=cv2.INTER_AREA,
+                        )
+
+                    results = self._yolo.track(
+                        infer_frame,
+                        persist=True,
+                        verbose=False,
+                        device=self._device,
+                        half=use_half,
+                        classes=[0],
+                        tracker=os.getenv("BLUR_TRACKER", "botsort.yaml"),
+                        imgsz=640,
+                    )
+                    current_ids: Set[int] = set()
+                    frame_candidates: List[Tuple[int, float]] = []
+
+                    for r in results:
+                        if r.boxes is None or r.boxes.id is None:
                             continue
+                        ids = r.boxes.id.int().cpu().tolist()
+                        xyxy = r.boxes.xyxy.cpu().numpy()
+                        for tid, box in zip(ids, xyxy):
+                            current_ids.add(tid)
+                            bx1, by1, bx2, by2 = box[:4]
+                            if scale != 1.0:
+                                bx1, by1, bx2, by2 = (
+                                    bx1 / scale,
+                                    by1 / scale,
+                                    bx2 / scale,
+                                    by2 / scale,
+                                )
+                            px1, py1, px2, py2 = map(int, (bx1, by1, bx2, by2))
+                            fx1, fy1, fx2, fy2 = self._person_face_region(
+                                frame, px1, py1, px2, py2
+                            )
+                            last_face_boxes[tid] = (fx1, fy1, fx2, fy2)
 
-                        if frame_idx % throttle != 0:
-                            continue
+                            if tid in locked_targets:
+                                pad = int(0.08 * max(fx2 - fx1, fy2 - fy1))
+                                _gaussian_blur_roi(
+                                    frame, fx1 - pad, fy1 - pad, fx2 + pad, fy2 + pad
+                                )
+                                continue
 
-                        emb = self._embedding_for_face_region(frame, fx1, fy1, fx2, fy2)
-                        if emb is None or emb.shape[0] != master_dim:
-                            match_streak[tid] = 0
-                            continue
-                        sim = _cosine_similarity(master, emb)
-                        if sim >= match_threshold:
-                            frame_candidates.append((tid, sim))
-                        else:
-                            match_streak[tid] = 0
+                            if frame_idx % throttle != 0:
+                                continue
 
-                if frame_idx % throttle == 0 and frame_candidates:
-                    frame_candidates.sort(key=lambda x: x[1], reverse=True)
-                    best_tid, best_sim = frame_candidates[0]
-                    second_sim = frame_candidates[1][1] if len(frame_candidates) > 1 else 0.0
-                    if len(frame_candidates) == 1 or (best_sim - second_sim) >= 0.05:
-                        match_streak[best_tid] = match_streak.get(best_tid, 0) + 1
-                        if match_streak[best_tid] >= min_streak:
-                            locked_targets.add(best_tid)
-                            active_tracks[best_tid] = 0
-                    for tid, _ in frame_candidates[1:]:
-                        if tid != best_tid:
-                            match_streak[tid] = 0
+                            emb = self._embedding_for_face_region(
+                                frame, fx1, fy1, fx2, fy2
+                            )
+                            if emb is None or emb.shape[0] != master_dim:
+                                match_streak[tid] = 0
+                                continue
+                            sim = _cosine_similarity(master, emb)
+                            if sim >= match_threshold:
+                                frame_candidates.append((tid, sim))
+                            else:
+                                match_streak[tid] = 0
 
-                for tid in list(locked_targets):
-                    if tid not in current_ids:
-                        active_tracks[tid] = active_tracks.get(tid, 0) + 1
-                        if active_tracks[tid] > grace:
-                            locked_targets.discard(tid)
-                            active_tracks.pop(tid, None)
-                            match_streak.pop(tid, None)
+                    if frame_idx % throttle == 0 and frame_candidates:
+                        frame_candidates.sort(key=lambda x: x[1], reverse=True)
+                        best_tid, best_sim = frame_candidates[0]
+                        second_sim = (
+                            frame_candidates[1][1] if len(frame_candidates) > 1 else 0.0
+                        )
+                        if len(frame_candidates) == 1 or (best_sim - second_sim) >= 0.05:
+                            match_streak[best_tid] = match_streak.get(best_tid, 0) + 1
+                            if match_streak[best_tid] >= min_streak:
+                                locked_targets.add(best_tid)
+                                active_tracks[best_tid] = 0
+                        for tid, _ in frame_candidates[1:]:
+                            if tid != best_tid:
+                                match_streak[tid] = 0
+
+                    for tid in list(locked_targets):
+                        if tid not in current_ids:
+                            active_tracks[tid] = active_tracks.get(tid, 0) + detect_interval
+                            if active_tracks[tid] > grace:
+                                locked_targets.discard(tid)
+                                active_tracks.pop(tid, None)
+                                match_streak.pop(tid, None)
+                                last_face_boxes.pop(tid, None)
 
             writer.write(frame)
             frame_idx += 1
             if in_range:
                 processed += 1
+                if processed % 30 == 0:
+                    _report_progress()
 
         cap.release()
         writer.release()
+
+        if progress_cb:
+            progress_cb(99.0, "Encoding output")
 
         final_path = output_path
         if _transcode_for_browser(raw_path, output_path):
@@ -579,6 +645,7 @@ def anonymize_video(
     min_match_streak: int = 2,
     start_sec: Optional[float] = None,
     end_sec: Optional[float] = None,
+    progress_cb: Optional[Callable[[float, str], None]] = None,
 ) -> Dict[str, object]:
     """
     Blur faces in video that match person(s) in reference images.
@@ -599,6 +666,7 @@ def anonymize_video(
             min_match_streak=min_match_streak,
             start_sec=start_sec,
             end_sec=end_sec,
+            progress_cb=progress_cb,
         )
     elapsed = time.perf_counter() - t0
     stats["processing_time_sec"] = round(elapsed, 2)

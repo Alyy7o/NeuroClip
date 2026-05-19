@@ -2810,30 +2810,19 @@ async def compress_video(
             rel_path = output_path.relative_to(REPO_ROOT / "output_data")
             static_url = f"/static/{rel_path.as_posix()}"
 
-            # A. processing_history (The job log)
+            # A. user_videos first (processing_history.video_id FK)
             if user_id:
-                # Ensure profile exists
                 try:
-                    supabase.table("profiles").upsert({"id": user_id}, on_conflict="id").execute()
+                    supabase.table("profiles").upsert(
+                        {
+                            "id": user_id,
+                            "email": f"user_{user_id[:8]}@neuroclip.local",
+                            "full_name": "NeuroClip User",
+                        },
+                        on_conflict="id",
+                    ).execute()
                 except Exception:
                     pass
-                supabase.table("processing_history").insert({
-                    "user_id":    user_id,
-                    "video_id":   job_id,
-                    "module":     "compression",
-                    "input_type": "file",
-                    "input_url":  safe_name,
-                    "query":      (
-                        f"H.265 / {mode_label} / 720p / "
-                        f"Total Proc: {duration:.2f}s / "
-                        f"Reduction: {reduction:.1f}%"
-                    ),
-                    "status": "completed",
-                }).execute()
-            
-            # B. user_videos (Primary metadata table for all video types)
-            # Storing here ensures visual tracking in history even for non-AI tasks
-            if user_id:
                 supabase.table("user_videos").upsert({
                     "id":                job_id,
                     "user_id":           user_id,
@@ -2845,6 +2834,7 @@ async def compress_video(
                     "duration":          float(probe_duration),
                     "status":            "completed",
                     "metadata": {
+                        "module": "compression",
                         "encoder": mode_label,
                         "original_size": original_size,
                         "reduction": reduction,
@@ -2853,6 +2843,20 @@ async def compress_video(
                         "input_codec": input_codec,
                         "input_bitrate_kbps": input_bitrate_kbps,
                     }
+                }).execute()
+                supabase.table("processing_history").insert({
+                    "user_id": user_id,
+                    "video_id": job_id,
+                    "module": "compression",
+                    "input_type": "file",
+                    "input_url": safe_name,
+                    "query": (
+                        f"H.265 / {mode_label} / 720p / "
+                        f"Total Proc: {duration:.2f}s / "
+                        f"Reduction: {reduction:.1f}%"
+                    ),
+                    "result_url": static_url,
+                    "status": "completed",
                 }).execute()
             
         except Exception as e:
@@ -2975,23 +2979,20 @@ async def anonymize_video_endpoint(
 
         if supabase is not None and user_id:
             try:
-                supabase.table("profiles").upsert({"id": user_id}, on_conflict="id").execute()
+                supabase.table("profiles").upsert(
+                    {
+                        "id": user_id,
+                        "email": f"user_{user_id[:8]}@neuroclip.local",
+                        "full_name": "NeuroClip User",
+                    },
+                    on_conflict="id",
+                ).execute()
             except Exception:
                 pass
             try:
                 history_query = query_note or (
                     f"ref_images={saved_refs} threshold={match_threshold}"
                 )
-                supabase.table("processing_history").insert({
-                    "user_id": user_id,
-                    "video_id": job_id,
-                    "module": "blurring",
-                    "input_type": "file",
-                    "input_url": safe_name,
-                    "query": history_query,
-                    "result_url": static_url,
-                    "status": "completed",
-                }).execute()
                 supabase.table("user_videos").upsert({
                     "id": job_id,
                     "user_id": user_id,
@@ -3002,6 +3003,16 @@ async def anonymize_video_endpoint(
                     "duration": float(stats.get("video_duration_sec", 0)),
                     "status": "completed",
                     "metadata": {"module": "blurring"},
+                }).execute()
+                supabase.table("processing_history").insert({
+                    "user_id": user_id,
+                    "video_id": job_id,
+                    "module": "blurring",
+                    "input_type": "file",
+                    "input_url": safe_name,
+                    "query": history_query,
+                    "result_url": static_url,
+                    "status": "completed",
                 }).execute()
             except Exception as e:
                 print("Supabase persistence failed for blurring job:", e)

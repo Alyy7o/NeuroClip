@@ -24,9 +24,13 @@ OPTIONAL = {
 
 BLUR_OPTIONAL = {
     "BLUR_YOLO_WEIGHTS":       "Path to yolov8 .pt (default: auto-download yolov8n.pt)",
-    "BLUR_FACE_WEIGHTS":       "Optional dedicated face detector .pt",
+    "BLUR_FACE_WEIGHTS":       "Optional dedicated face detector .pt (reference fallback)",
     "BLUR_DEVICE":             "cuda:0 or cpu (default: auto)",
     "BLUR_TRACKER":            "Ultralytics tracker yaml (default: botsort.yaml)",
+    "BLUR_FACE_DETECT":        "insightface|heuristic (default: insightface SCRFD on person crops)",
+    "BLUR_MIN_FACE_PX":        "Min face box side in px (default: 28)",
+    "BLUR_MATCH_THRESHOLD":    "Cosine match threshold (default: 0.78)",
+    "BLUR_INSIGHTFACE_MODEL":  "InsightFace pack name (default: buffalo_l)",
 }
 
 print("=" * 60)

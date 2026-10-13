@@ -13,14 +13,14 @@ os.makedirs(OUTPUT_DIR, exist_ok=True)
 # ── Global styling ──
 plt.style.use('seaborn-v0_8-whitegrid' if 'seaborn-v0_8-whitegrid' in plt.style.available else 'default')
 plt.rcParams.update({
-    'font.size': 12,
-    'axes.labelsize': 14,
-    'axes.titlesize': 16,
-    'xtick.labelsize': 11,
-    'ytick.labelsize': 11,
-    'legend.fontsize': 11,
-    'figure.titlesize': 18,
-    'figure.figsize': (10, 6),
+    'font.size': 18,
+    'axes.labelsize': 20,
+    'axes.titlesize': 22,
+    'xtick.labelsize': 16,
+    'ytick.labelsize': 16,
+    'legend.fontsize': 16,
+    'figure.titlesize': 24,
+    'figure.figsize': (12, 8),
     'figure.dpi': 300,
     'axes.facecolor': '#f8f9fa',
     'figure.facecolor': '#ffffff',
@@ -101,7 +101,7 @@ def plot_domain_performance(results):
             h = bar.get_height()
             ax.annotate(f'{h:.2f}', xy=(bar.get_x() + bar.get_width() / 2, h),
                         xytext=(0, 4), textcoords="offset points",
-                        ha='center', va='bottom', fontsize=9, fontweight='bold')
+                        ha='center', va='bottom', fontsize=14, fontweight='bold')
 
     plt.tight_layout()
     path = os.path.join(OUTPUT_DIR, 'retrieval_performance.png')
@@ -149,7 +149,7 @@ def plot_difficulty_breakdown(results):
             h = bar.get_height()
             ax.annotate(f'{h:.2f}', xy=(bar.get_x() + bar.get_width() / 2, h),
                         xytext=(0, 4), textcoords="offset points",
-                        ha='center', va='bottom', fontsize=10, fontweight='bold')
+                        ha='center', va='bottom', fontsize=14, fontweight='bold')
 
     plt.tight_layout()
     path = os.path.join(OUTPUT_DIR, 'difficulty_breakdown.png')
@@ -239,7 +239,7 @@ def plot_summarization_coverage(results):
                 labels=[f'Has Summary ({has_summary})', f'No Summary ({no_summary})'],
                 colors=[COLORS['secondary'], COLORS['grey']],
                 autopct='%1.1f%%', startangle=90,
-                textprops={'fontsize': 12},
+                textprops={'fontsize': 16},
                 wedgeprops={'edgecolor': 'white', 'linewidth': 2})
     axes[0].set_title('Topic Explanation Coverage')
 
@@ -248,11 +248,11 @@ def plot_summarization_coverage(results):
                 labels=[f'Has LLM Summary ({has_llm})', f'No LLM Summary ({no_llm})'],
                 colors=[COLORS['purple'], COLORS['grey']],
                 autopct='%1.1f%%', startangle=90,
-                textprops={'fontsize': 12},
+                textprops={'fontsize': 16},
                 wedgeprops={'edgecolor': 'white', 'linewidth': 2})
     axes[1].set_title('Per-Clip LLM Summary Coverage')
 
-    plt.suptitle('Summarization Pipeline Coverage', fontsize=16, fontweight='bold')
+    plt.suptitle('Summarization Pipeline Coverage', fontsize=20, fontweight='bold')
     plt.tight_layout()
     path = os.path.join(OUTPUT_DIR, 'summarization_coverage.png')
     plt.savefig(path)
@@ -297,10 +297,10 @@ def plot_temporal_accuracy(results):
         Patch(facecolor=COLORS['secondary'], label='Relevant (IoU > 0.3)'),
         Patch(facecolor=COLORS['accent'], label='Not Relevant (IoU ≤ 0.3)')
     ]
-    fig.legend(handles=legend_elements, loc='lower center', ncol=2, fontsize=11,
+    fig.legend(handles=legend_elements, loc='lower center', ncol=2, fontsize=14,
                bbox_to_anchor=(0.5, -0.02))
 
-    plt.suptitle('Temporal Alignment: Predicted vs Ground Truth Timestamps', fontsize=15, fontweight='bold')
+    plt.suptitle('Temporal Alignment: Predicted vs Ground Truth Timestamps', fontsize=20, fontweight='bold')
     plt.tight_layout(rect=[0, 0.05, 1, 1])
     path = os.path.join(OUTPUT_DIR, 'temporal_accuracy.png')
     plt.savefig(path, bbox_inches='tight')
@@ -329,11 +329,11 @@ def plot_summary_dashboard(results):
         ax.barh([0], [values[i]], color=bar_colors[i], height=0.5, edgecolor='white')
         ax.set_xlim(0, max(values[i] * 1.3, 1))
         ax.set_yticks([])
-        ax.set_xlabel(metrics[i], fontsize=12, fontweight='bold')
+        ax.set_xlabel(metrics[i], fontsize=16, fontweight='bold')
         ax.text(values[i] * 0.5, 0, display_values[i], ha='center', va='center',
-                fontsize=18, fontweight='bold', color='white')
+                fontsize=24, fontweight='bold', color='white')
 
-    plt.suptitle(f'NeuroClip Evaluation Dashboard (n={total} queries)', fontsize=16, fontweight='bold')
+    plt.suptitle(f'NeuroClip Evaluation Dashboard (n={total} queries)', fontsize=20, fontweight='bold')
     plt.tight_layout()
     path = os.path.join(OUTPUT_DIR, 'evaluation_dashboard.png')
     plt.savefig(path)

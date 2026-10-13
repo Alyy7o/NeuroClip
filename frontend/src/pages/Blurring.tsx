@@ -5,13 +5,12 @@ import { EyeOff, Play, Download, RotateCcw } from 'lucide-react';
 import { DashboardLayout } from '@/components/DashboardLayout';
 import { VideoInput } from '@/components/VideoInput';
 import { VideoPreview } from '@/components/VideoPreview';
-import { UrlVideoPreview } from '@/components/UrlVideoPreview';
 import { VideoPlayer } from '@/components/VideoPlayer';
 import { ProcessingLoader } from '@/components/ProcessingLoader';
 import { ReferenceImageUpload } from '@/components/ReferenceImageUpload';
 import { Button } from '@/components/ui/button';
-import { Textarea } from '@/components/ui/textarea';
-import { Label } from '@/components/ui/label';
+// import { Textarea } from '@/components/ui/textarea';
+// import { Label } from '@/components/ui/label';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { useToast } from '@/hooks/use-toast';
 import { useAuth } from '@/contexts/AuthContext';
@@ -26,14 +25,6 @@ const API_BASE = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8040';
 
 const processingSchema = z.object({
   query: z.string().trim().max(1000, { message: 'Query must be less than 1000 characters' }).optional(),
-  url: z
-    .string()
-    .trim()
-    .max(2048, { message: 'URL too long' })
-    .optional()
-    .refine((val) => !val || val === '' || z.string().url().safeParse(val).success, {
-      message: 'Invalid URL format',
-    }),
   fileName: z.string().max(255, { message: 'File name too long' }).optional(),
 });
 
@@ -46,7 +37,6 @@ const blurringSteps = [
 
 export default function Blurring() {
   const [file, setFile] = useState<File | null>(null);
-  const [url, setUrl] = useState('');
   const [referenceImages, setReferenceImages] = useState<File[]>([]);
   const [query, setQuery] = useState('');
   const [timeRange, setTimeRange] = useState({ start: 0, end: 0 });
@@ -107,7 +97,6 @@ export default function Blurring() {
 
       const validationResult = processingSchema.safeParse({
         query: queryWithTime,
-        url: url || '',
         fileName: file.name,
       });
 
@@ -284,7 +273,6 @@ export default function Blurring() {
     setShowResults(false);
     setResult(null);
     setFile(null);
-    setUrl('');
     setQuery('');
     setReferenceImages([]);
   };
@@ -410,26 +398,13 @@ export default function Blurring() {
                       onTimeRangeChange={(start, end) => setTimeRange({ start, end })}
                     />
                   </div>
-                ) : url ? (
-                  <div className="space-y-4">
-                    <p className="text-sm text-amber-600 dark:text-amber-400">
-                      URL preview only — please upload a file to run anonymization.
-                    </p>
-                    <UrlVideoPreview
-                      url={url}
-                      onTimeRangeChange={(start, end) => setTimeRange({ start, end })}
-                    />
-                    <Button variant="outline" size="sm" onClick={() => setUrl('')}>
-                      Clear URL
-                    </Button>
-                  </div>
                 ) : (
                   <VideoInput
                     onFileSelect={setFile}
-                    onUrlSubmit={setUrl}
+                    onUrlSubmit={() => {}}
                     file={file}
-                    url={url}
                     disabled={processing}
+                    hideUrl
                   />
                 )}
 
@@ -439,7 +414,8 @@ export default function Blurring() {
                   disabled={processing}
                 />
 
-                <div className="space-y-2">
+                {/* Notes (optional) — hidden for now
+                <motion.div className="space-y-2">
                   <Label htmlFor="query">Notes (optional)</Label>
                   <Textarea
                     id="query"
@@ -450,7 +426,8 @@ export default function Blurring() {
                     rows={3}
                     className="resize-none"
                   />
-                </div>
+                </motion.div>
+                */}
 
                 <Button
                   onClick={handleProcess}

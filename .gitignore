@@ -40,11 +40,6 @@ Thumbs.db
 # Misc
 coverage/
 
-# FYP standee generated output
-docs/standee/standee-print.pdf
-docs/standee/node_modules/
-
-
 # backend
 
 backend/node_modules/
@@ -65,3 +60,12 @@ backend/Semantic-search-app/backend/output_data/
 backend/Semantic-search-app/backend/uploads/
 backend/Semantic-search-app/backend/frames/
 backend/Semantic-search-app/.env
+
+# Local docs / figures (do not push)
+docs/
+paper_figures/
+test_results/
+
+
+# misc
+misc/

@@ -1,13 +1,22 @@
 """
-Reference-image face anonymization for NeuroClip.
+Selective, reference-guided face anonymization for NeuroClip.
+
+Research claim (frozen — see docs/Blurring_Module_Paper_Roadmap.md §0):
+  Blur ONLY faces that match user-provided reference photo(s) in any video.
+  Not NLP-driven, not plates/IDs, not blur-everyone. Do not cite unreproducible
+  accuracy numbers until the Step 6 evaluation harness recomputes them.
 
 Pipeline:
-  1. Build master face embedding(s) from reference images (YOLO person/face + optional InsightFace).
-  2. Process video frames with YOLO tracking; match detected faces to master signatures.
-  3. Apply Gaussian blur to matched regions; propagate via track IDs with grace frames.
+  1. Build master face embedding(s) from reference images (InsightFace buffalo_l).
+  2. Process video with YOLOv8n person tracking (BoT-SORT); SCRFD face boxes on
+     person crops (InsightFace); cosine-match; lock tracks after match streak.
+  3. Apply Gaussian blur to locked face ROIs; FFmpeg H.264 for browser playback.
 
-Configure weights via BLUR_YOLO_WEIGHTS (default: yolov8n.pt auto-download).
-Optional: BLUR_FACE_WEIGHTS for a dedicated face detector .pt file.
+Env:
+  BLUR_YOLO_WEIGHTS, BLUR_DEVICE, BLUR_TRACKER, BLUR_MATCH_THRESHOLD
+  BLUR_FACE_DETECT=insightface|heuristic (default insightface)
+  BLUR_MIN_FACE_PX=28
+  Optional BLUR_FACE_WEIGHTS for a dedicated face YOLO .pt (reference fallback)
 """
 
 from __future__ import annotations
@@ -19,7 +28,7 @@ import subprocess
 import threading
 import time
 from pathlib import Path
-from typing import Callable, Dict, List, Optional, Set, Tuple
+from typing import Callable, Dict, List, NamedTuple, Optional, Set, Tuple
 
 import cv2
 import numpy as np
@@ -29,6 +38,16 @@ logger = logging.getLogger(__name__)
 _PROCESS_LOCK = threading.Lock()
 _ENGINE: Optional["BlurEngine"] = None
 DEFAULT_MATCH_THRESHOLD = float(os.getenv("BLUR_MATCH_THRESHOLD", "0.78"))
+DEFAULT_MIN_FACE_PX = int(os.getenv("BLUR_MIN_FACE_PX", "28"))
+DEFAULT_FACE_DETECT = os.getenv("BLUR_FACE_DETECT", "insightface").strip().lower()
+
+
+class FaceHit(NamedTuple):
+    """Face box in full-frame coords plus optional embedding from the same detect call."""
+
+    box: Tuple[int, int, int, int]
+    embedding: Optional[np.ndarray]
+    det_score: float
 
 
 def _resolve_ffmpeg() -> Optional[str]:
@@ -139,7 +158,25 @@ class BlurEngine:
         self._yolo = None
         self._face_yolo = None
         self._insightface = None
+        self._haar_cascade: Optional[cv2.CascadeClassifier] = None
+        self._face_detect_mode = DEFAULT_FACE_DETECT
+        self._min_face_px = max(8, DEFAULT_MIN_FACE_PX)
         self._load_models()
+        self._load_haar_cascade()
+
+    def _load_haar_cascade(self) -> None:
+        """Cache Haar once for heuristic / reference fallback (no per-call reconstruct)."""
+        try:
+            path = cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
+            cascade = cv2.CascadeClassifier(path)
+            if cascade.empty():
+                logger.warning("[blur] Haar cascade failed to load from %s", path)
+                self._haar_cascade = None
+            else:
+                self._haar_cascade = cascade
+        except Exception as exc:
+            logger.warning("[blur] Haar cascade unavailable: %s", exc)
+            self._haar_cascade = None
 
     def _load_models(self) -> None:
         from ultralytics import YOLO
@@ -288,13 +325,13 @@ class BlurEngine:
         if boxes:
             return boxes
 
-        # Haar fallback for reference stills
-        gray = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2GRAY)
-        cascade = cv2.CascadeClassifier(
-            cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
-        )
-        for (x, y, fw, fh) in cascade.detectMultiScale(gray, 1.1, 4, minSize=(30, 30)):
-            boxes.append((x, y, x + fw, y + fh))
+        # Haar fallback for reference stills (cached classifier)
+        if self._haar_cascade is not None:
+            gray = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2GRAY)
+            for (x, y, fw, fh) in self._haar_cascade.detectMultiScale(
+                gray, 1.1, 4, minSize=(30, 30)
+            ):
+                boxes.append((x, y, x + fw, y + fh))
         return boxes
 
     def build_master_signatures(self, reference_dir: Path) -> np.ndarray:
@@ -358,7 +395,7 @@ class BlurEngine:
     def _person_face_region(
         self, frame: np.ndarray, px1: int, py1: int, px2: int, py2: int
     ) -> Tuple[int, int, int, int]:
-        """Estimate face region inside a person bounding box (upper ~40%)."""
+        """Heuristic face ROI inside a person box (upper ~45% + cached Haar). Fallback only."""
         ph = py2 - py1
         pw = px2 - px1
         fy2 = py1 + int(ph * 0.45)
@@ -367,11 +404,118 @@ class BlurEngine:
         sub = frame[py1:fy2, fx1:fx2]
         if sub.size == 0:
             return px1, py1, px2, py2
-        for (x, y, fw, fh) in cv2.CascadeClassifier(
-            cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
-        ).detectMultiScale(cv2.cvtColor(sub, cv2.COLOR_BGR2GRAY), 1.1, 4, minSize=(24, 24)):
-            return fx1 + x, py1 + y, fx1 + x + fw, py1 + y + fh
+        if self._haar_cascade is not None:
+            gray = cv2.cvtColor(sub, cv2.COLOR_BGR2GRAY)
+            min_sz = max(16, min(24, self._min_face_px))
+            for (x, y, fw, fh) in self._haar_cascade.detectMultiScale(
+                gray, 1.1, 4, minSize=(min_sz, min_sz)
+            ):
+                return fx1 + x, py1 + y, fx1 + x + fw, py1 + y + fh
         return fx1, py1, fx2, fy2
+
+    @staticmethod
+    def _embedding_from_face_obj(face) -> Optional[np.ndarray]:
+        """Prefer L2-normalized embedding from the same InsightFace.get() call."""
+        emb = getattr(face, "normed_embedding", None)
+        if emb is None:
+            emb = getattr(face, "embedding", None)
+        if emb is None:
+            return None
+        vec = np.asarray(emb, dtype=np.float32).ravel()
+        n = np.linalg.norm(vec)
+        if n > 1e-9:
+            vec = vec / n
+        return vec
+
+    def _faces_in_person_crop(
+        self,
+        frame: np.ndarray,
+        px1: int,
+        py1: int,
+        px2: int,
+        py2: int,
+        *,
+        pad_frac: float = 0.18,
+    ) -> List[FaceHit]:
+        """
+        Run InsightFace SCRFD on a padded person crop; return faces in full-frame coords.
+        Only keeps faces whose center lies inside the person box.
+        """
+        if self._insightface is None:
+            return []
+
+        h, w = frame.shape[:2]
+        pw, ph = max(1, px2 - px1), max(1, py2 - py1)
+        pad_x = int(pad_frac * pw)
+        pad_y = int(pad_frac * ph)
+        cx1, cy1 = max(0, px1 - pad_x), max(0, py1 - pad_y)
+        cx2, cy2 = min(w, px2 + pad_x), min(h, py2 + pad_y)
+        if cx2 <= cx1 or cy2 <= cy1:
+            return []
+
+        crop = frame[cy1:cy2, cx1:cx2]
+        if crop.size == 0:
+            return []
+
+        try:
+            faces = self._insightface.get(crop)
+        except Exception as exc:
+            logger.warning("[blur] InsightFace crop detect failed: %s", exc)
+            return []
+
+        hits: List[FaceHit] = []
+        min_px = self._min_face_px
+        for face in faces or []:
+            bbox = getattr(face, "bbox", None)
+            if bbox is None:
+                continue
+            fx1, fy1, fx2, fy2 = map(int, bbox[:4])
+            # Map crop-local → full frame
+            fx1, fy1, fx2, fy2 = fx1 + cx1, fy1 + cy1, fx2 + cx1, fy2 + cy1
+            fw, fh = fx2 - fx1, fy2 - fy1
+            if fw < min_px or fh < min_px:
+                continue
+            cx = (fx1 + fx2) / 2.0
+            cy = (fy1 + fy2) / 2.0
+            if not (px1 <= cx <= px2 and py1 <= cy <= py2):
+                continue
+            score = float(getattr(face, "det_score", 0.0) or 0.0)
+            hits.append(
+                FaceHit(
+                    box=(fx1, fy1, fx2, fy2),
+                    embedding=self._embedding_from_face_obj(face),
+                    det_score=score,
+                )
+            )
+        return hits
+
+    def _best_face_for_person(
+        self,
+        frame: np.ndarray,
+        px1: int,
+        py1: int,
+        px2: int,
+        py2: int,
+    ) -> FaceHit:
+        """
+        Primary: InsightFace SCRFD on person crop (score × area).
+        Fallback: heuristic upper-body / Haar ROI (no embedding).
+        """
+        use_insight = (
+            self._face_detect_mode != "heuristic" and self._insightface is not None
+        )
+        if use_insight:
+            hits = self._faces_in_person_crop(frame, px1, py1, px2, py2)
+            if hits:
+                best = max(
+                    hits,
+                    key=lambda hit: hit.det_score
+                    * max(1, (hit.box[2] - hit.box[0]) * (hit.box[3] - hit.box[1])),
+                )
+                return best
+
+        box = self._person_face_region(frame, px1, py1, px2, py2)
+        return FaceHit(box=box, embedding=None, det_score=0.0)
 
     def process_video(
         self,
@@ -432,11 +576,14 @@ class BlurEngine:
         frames_to_process = max(1, end_frame - start_frame)
 
         logger.info(
-            "[blur] match_threshold=%.2f min_streak=%d throttle=%d device=%s ~%.0fs video",
+            "[blur] match_threshold=%.2f min_streak=%d throttle=%d device=%s "
+            "face_detect=%s min_face_px=%d ~%.0fs video",
             match_threshold,
             min_streak,
             throttle,
             self._device,
+            self._face_detect_mode if self._insightface is not None else "heuristic",
+            self._min_face_px,
             duration_est,
         )
 
@@ -505,12 +652,14 @@ class BlurEngine:
                                     by2 / scale,
                                 )
                             px1, py1, px2, py2 = map(int, (bx1, by1, bx2, by2))
-                            fx1, fy1, fx2, fy2 = self._person_face_region(
+                            face_hit = self._best_face_for_person(
                                 frame, px1, py1, px2, py2
                             )
+                            fx1, fy1, fx2, fy2 = face_hit.box
                             last_face_boxes[tid] = (fx1, fy1, fx2, fy2)
 
                             if tid in locked_targets:
+                                # Locked: refresh face box only; skip re-ID embed.
                                 pad = int(0.08 * max(fx2 - fx1, fy2 - fy1))
                                 _gaussian_blur_roi(
                                     frame, fx1 - pad, fy1 - pad, fx2 + pad, fy2 + pad
@@ -520,9 +669,12 @@ class BlurEngine:
                             if frame_idx % throttle != 0:
                                 continue
 
-                            emb = self._embedding_for_face_region(
-                                frame, fx1, fy1, fx2, fy2
-                            )
+                            # Prefer embedding from the same SCRFD get(); else re-embed ROI.
+                            emb = face_hit.embedding
+                            if emb is None or emb.shape[0] != master_dim:
+                                emb = self._embedding_for_face_region(
+                                    frame, fx1, fy1, fx2, fy2
+                                )
                             if emb is None or emb.shape[0] != master_dim:
                                 match_streak[tid] = 0
                                 continue

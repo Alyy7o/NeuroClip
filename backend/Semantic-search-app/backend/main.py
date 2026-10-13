@@ -2983,8 +2983,10 @@ async def anonymize_video_endpoint(
                 history_query = query_note or (
                     f"ref_images={saved_refs} threshold={match_threshold}"
                 )
+                # user_videos.job_id is NOT NULL — must set it (same as summarization upsert).
                 supabase.table("user_videos").upsert({
                     "id": job_id,
+                    "job_id": job_id,
                     "user_id": user_id,
                     "title": f"Anonymized: {safe_name}",
                     "original_filename": safe_name,

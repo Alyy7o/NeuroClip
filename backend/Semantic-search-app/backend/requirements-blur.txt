@@ -1,6 +1,9 @@
-# GPU blur overlay — install on Kaggle GPU notebooks:
-# pip install -r requirements.txt -r requirements-blur.txt
-# pip uninstall -y onnxruntime && pip install onnxruntime-gpu  # InsightFace GPU
+# GPU blur overlay — install on Kaggle GPU notebooks (Accel = GPU T4 x2):
+#   pip install -r requirements.txt -r requirements-blur.txt
+#   pip uninstall -y onnxruntime onnxruntime-gpu
+#   pip install onnxruntime-gpu
+#   export BLUR_DEVICE=cuda:0
+# Plain `onnxruntime` (CPU EP only) silently keeps InsightFace on CPU (~1h / 17s clip).
 ultralytics>=8.0.0
 insightface>=0.7.3
 onnxruntime-gpu>=1.16.0

@@ -500,17 +500,20 @@ def health():
     """Simple health check to verify service is reachable."""
     blur_loaded = False
     cuda_available = False
+    blur_gpu: dict = {}
     paths = _registered_paths()
     has_anonymize = "/anonymize-video" in paths
     try:
-        from blur_service import blur_model_loaded
+        from blur_service import blur_gpu_status, blur_model_loaded
+
         blur_loaded = blur_model_loaded()
+        blur_gpu = blur_gpu_status()
+        cuda_available = bool(blur_gpu.get("cuda_available"))
     except Exception:
-        pass
-    try:
-        cuda_available = torch.cuda.is_available()
-    except Exception:
-        pass
+        try:
+            cuda_available = torch.cuda.is_available()
+        except Exception:
+            pass
     return {
         "status": "ok",
         "service": "semantic-backend",
@@ -518,6 +521,10 @@ def health():
         "build_id": API_BUILD_ID,
         "cuda_available": cuda_available,
         "blur_model_loaded": blur_loaded,
+        "blur_device": blur_gpu.get("blur_device"),
+        "ort_providers": blur_gpu.get("ort_providers", []),
+        "insightface_on_gpu": blur_gpu.get("insightface_on_gpu"),
+        "blur_require_gpu": blur_gpu.get("require_gpu"),
         "has_anonymize_endpoint": has_anonymize,
         "has_compress_endpoint": "/compress-video" in paths,
     }

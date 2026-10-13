@@ -3,20 +3,18 @@ Selective, reference-guided face anonymization for NeuroClip.
 
 Research claim (frozen — see docs/Blurring_Module_Paper_Roadmap.md §0):
   Blur ONLY faces that match user-provided reference photo(s) in any video.
-  Not NLP-driven, not plates/IDs, not blur-everyone. Do not cite unreproducible
-  accuracy numbers until the Step 6 evaluation harness recomputes them.
+  Not NLP-driven, not plates/IDs, not blur-everyone.
 
 Pipeline:
-  1. Build master face embedding(s) from reference images (InsightFace buffalo_l).
-  2. Process video with YOLOv8n person tracking (BoT-SORT); SCRFD face boxes on
-     person crops (InsightFace); cosine-match; lock tracks after match streak.
-  3. Apply Gaussian blur to locked face ROIs; FFmpeg H.264 for browser playback.
+  1. One master embedding per reference image (InsightFace buffalo_l).
+  2. YOLOv8n person track (BoT-SORT) + SCRFD face boxes on person crops.
+  3. Max-sim match to any master; multi-lock + re-attach after ID switch.
+  4. Adaptive elliptical Gaussian (or mosaic) blur; FFmpeg H.264 for browser.
 
 Env:
-  BLUR_YOLO_WEIGHTS, BLUR_DEVICE, BLUR_TRACKER, BLUR_MATCH_THRESHOLD
-  BLUR_FACE_DETECT=insightface|heuristic (default insightface)
-  BLUR_MIN_FACE_PX=28
-  Optional BLUR_FACE_WEIGHTS for a dedicated face YOLO .pt (reference fallback)
+  BLUR_DEVICE, BLUR_REQUIRE_GPU, BLUR_YOLO_WEIGHTS, BLUR_TRACKER
+  BLUR_MATCH_THRESHOLD (default 0.78), BLUR_FACE_DETECT, BLUR_MIN_FACE_PX
+  BLUR_MAX_THROTTLE (default 4), BLUR_OPERATOR=gaussian|mosaic
 """
 
 from __future__ import annotations
@@ -40,6 +38,8 @@ _ENGINE: Optional["BlurEngine"] = None
 DEFAULT_MATCH_THRESHOLD = float(os.getenv("BLUR_MATCH_THRESHOLD", "0.78"))
 DEFAULT_MIN_FACE_PX = int(os.getenv("BLUR_MIN_FACE_PX", "28"))
 DEFAULT_FACE_DETECT = os.getenv("BLUR_FACE_DETECT", "insightface").strip().lower()
+DEFAULT_MAX_THROTTLE = int(os.getenv("BLUR_MAX_THROTTLE", "4"))
+DEFAULT_OPERATOR = os.getenv("BLUR_OPERATOR", "gaussian").strip().lower()
 
 
 class FaceHit(NamedTuple):
@@ -48,6 +48,23 @@ class FaceHit(NamedTuple):
     box: Tuple[int, int, int, int]
     embedding: Optional[np.ndarray]
     det_score: float
+
+
+def _on_kaggle() -> bool:
+    return bool(
+        os.getenv("KAGGLE_KERNEL_RUN_TYPE")
+        or os.getenv("KAGGLE_URL_BASE")
+        or Path("/kaggle").exists()
+    )
+
+
+def _require_gpu() -> bool:
+    raw = os.getenv("BLUR_REQUIRE_GPU", "").strip().lower()
+    if raw in ("1", "true", "yes", "on"):
+        return True
+    if raw in ("0", "false", "no", "off"):
+        return False
+    return _on_kaggle()
 
 
 def _resolve_ffmpeg() -> Optional[str]:
@@ -101,17 +118,24 @@ def _cosine_similarity(a: np.ndarray, b: np.ndarray) -> float:
     a = a.astype(np.float32).ravel()
     b = b.astype(np.float32).ravel()
     if a.shape[0] != b.shape[0]:
-        logger.warning(
-            "[blur] embedding dim mismatch: %d vs %d — skipping compare",
-            a.shape[0],
-            b.shape[0],
-        )
         return 0.0
     na = np.linalg.norm(a)
     nb = np.linalg.norm(b)
     if na < 1e-9 or nb < 1e-9:
         return 0.0
     return float(np.dot(a, b) / (na * nb))
+
+
+def _max_sim_to_masters(emb: np.ndarray, masters: np.ndarray) -> Tuple[float, int]:
+    """Return (best_sim, master_index). masters shape (N, D)."""
+    best_sim = -1.0
+    best_i = 0
+    for i in range(masters.shape[0]):
+        sim = _cosine_similarity(masters[i], emb)
+        if sim > best_sim:
+            best_sim = sim
+            best_i = i
+    return best_sim, best_i
 
 
 def _box_iou(a: Tuple[int, int, int, int], b: Tuple[int, int, int, int]) -> float:
@@ -128,32 +152,93 @@ def _box_iou(a: Tuple[int, int, int, int], b: Tuple[int, int, int, int]) -> floa
     return inter / union if union > 0 else 0.0
 
 
-def _gaussian_blur_roi(frame: np.ndarray, x1: int, y1: int, x2: int, y2: int, ksize: int = 51) -> None:
+def _box_center_dist(a: Tuple[int, int, int, int], b: Tuple[int, int, int, int]) -> float:
+    ax = (a[0] + a[2]) / 2.0
+    ay = (a[1] + a[3]) / 2.0
+    bx = (b[0] + b[2]) / 2.0
+    by = (b[1] + b[3]) / 2.0
+    return float(((ax - bx) ** 2 + (ay - by) ** 2) ** 0.5)
+
+
+def _odd_clamp(v: int, lo: int, hi: int) -> int:
+    v = max(lo, min(hi, int(v)))
+    if v % 2 == 0:
+        v += 1
+    return max(lo, min(hi, v))
+
+
+def _apply_face_anonymize(
+    frame: np.ndarray,
+    x1: int,
+    y1: int,
+    x2: int,
+    y2: int,
+    *,
+    operator: str = "gaussian",
+) -> None:
+    """Adaptive elliptical blur or mosaic on face ROI."""
     h, w = frame.shape[:2]
-    x1, y1 = max(0, x1), max(0, y1)
-    x2, y2 = min(w, x2), min(h, y2)
+    pad = int(0.08 * max(x2 - x1, y2 - y1, 1))
+    x1, y1 = max(0, x1 - pad), max(0, y1 - pad)
+    x2, y2 = min(w, x2 + pad), min(h, y2 + pad)
     if x2 <= x1 or y2 <= y1:
         return
     roi = frame[y1:y2, x1:x2]
     if roi.size == 0:
         return
-    k = ksize if ksize % 2 == 1 else ksize + 1
-    k = max(15, min(k, min(x2 - x1, y2 - y1) | 1))
-    frame[y1:y2, x1:x2] = cv2.GaussianBlur(roi, (k, k), 0)
+    rh, rw = roi.shape[:2]
+    k = _odd_clamp(int(0.45 * max(rw, rh)), 15, 99)
+    mask = np.zeros((rh, rw), dtype=np.uint8)
+    cv2.ellipse(
+        mask,
+        (rw // 2, rh // 2),
+        (max(1, rw // 2), max(1, rh // 2)),
+        0,
+        0,
+        360,
+        255,
+        -1,
+    )
+    if operator == "mosaic":
+        block = max(4, min(rw, rh) // 12)
+        small = cv2.resize(
+            roi,
+            (max(1, rw // block), max(1, rh // block)),
+            interpolation=cv2.INTER_LINEAR,
+        )
+        pix = cv2.resize(small, (rw, rh), interpolation=cv2.INTER_NEAREST)
+        anonymized = pix
+    else:
+        anonymized = cv2.GaussianBlur(roi, (k, k), 0)
+
+    mask_f = (mask.astype(np.float32) / 255.0)[:, :, None]
+    blended = (anonymized.astype(np.float32) * mask_f + roi.astype(np.float32) * (1.0 - mask_f)).astype(
+        np.uint8
+    )
+    frame[y1:y2, x1:x2] = blended
 
 
 class BlurEngine:
-    """Lazy-loaded YOLO + optional InsightFace for reference-based face blurring."""
+    """Lazy-loaded YOLO + InsightFace for reference-based face blurring."""
 
     def __init__(self) -> None:
+        self._cuda_available = False
+        self._cuda_name = ""
+        self._ort_providers: List[str] = []
+        self._insightface_on_gpu = False
         self._device = os.getenv("BLUR_DEVICE", "").strip()
-        if not self._device:
-            try:
-                import torch
 
-                self._device = "cuda:0" if torch.cuda.is_available() else "cpu"
-            except Exception:
-                self._device = "cpu"
+        try:
+            import torch
+
+            self._cuda_available = bool(torch.cuda.is_available())
+            if self._cuda_available:
+                self._cuda_name = torch.cuda.get_device_name(0)
+        except Exception:
+            self._cuda_available = False
+
+        if not self._device:
+            self._device = "cuda:0" if self._cuda_available else "cpu"
 
         self._yolo = None
         self._face_yolo = None
@@ -161,19 +246,52 @@ class BlurEngine:
         self._haar_cascade: Optional[cv2.CascadeClassifier] = None
         self._face_detect_mode = DEFAULT_FACE_DETECT
         self._min_face_px = max(8, DEFAULT_MIN_FACE_PX)
+        self._operator = DEFAULT_OPERATOR if DEFAULT_OPERATOR in ("gaussian", "mosaic") else "gaussian"
+        self._max_throttle = max(1, DEFAULT_MAX_THROTTLE)
+
         self._load_models()
         self._load_haar_cascade()
+        self._enforce_gpu_requirement()
+
+    def gpu_status(self) -> Dict[str, object]:
+        return {
+            "blur_device": self._device,
+            "cuda_available": self._cuda_available,
+            "cuda_name": self._cuda_name,
+            "ort_providers": list(self._ort_providers),
+            "insightface_on_gpu": self._insightface_on_gpu,
+            "insightface_loaded": self._insightface is not None,
+            "require_gpu": _require_gpu(),
+            "operator": self._operator,
+        }
+
+    def _enforce_gpu_requirement(self) -> None:
+        if not _require_gpu():
+            return
+        problems: List[str] = []
+        if not self._cuda_available or "cuda" not in self._device:
+            problems.append("torch CUDA unavailable or BLUR_DEVICE is not cuda:*")
+        if self._insightface is not None and not self._insightface_on_gpu:
+            problems.append(
+                "InsightFace has no CUDAExecutionProvider "
+                "(pip uninstall onnxruntime && pip install onnxruntime-gpu)"
+            )
+        if self._insightface is None and self._face_detect_mode != "heuristic":
+            problems.append("InsightFace failed to load")
+        if problems:
+            msg = (
+                "[blur] BLUR_REQUIRE_GPU: GPU blur not ready. "
+                + "; ".join(problems)
+                + ". Set notebook Accel=GPU T4 x2, then reinstall onnxruntime-gpu."
+            )
+            logger.error(msg)
+            raise RuntimeError(msg)
 
     def _load_haar_cascade(self) -> None:
-        """Cache Haar once for heuristic / reference fallback (no per-call reconstruct)."""
         try:
             path = cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
             cascade = cv2.CascadeClassifier(path)
-            if cascade.empty():
-                logger.warning("[blur] Haar cascade failed to load from %s", path)
-                self._haar_cascade = None
-            else:
-                self._haar_cascade = cascade
+            self._haar_cascade = None if cascade.empty() else cascade
         except Exception as exc:
             logger.warning("[blur] Haar cascade unavailable: %s", exc)
             self._haar_cascade = None
@@ -184,7 +302,13 @@ class BlurEngine:
         weights = os.getenv("BLUR_YOLO_WEIGHTS", "yolov8n.pt")
         if not Path(weights).exists() and not weights.endswith(".pt"):
             weights = "yolov8n.pt"
-        logger.info("[blur] Loading YOLO weights: %s on %s", weights, self._device)
+        logger.info(
+            "[blur] Loading YOLO weights=%s device=%s cuda=%s (%s)",
+            weights,
+            self._device,
+            self._cuda_available,
+            self._cuda_name or "n/a",
+        )
         self._yolo = YOLO(weights)
 
         face_weights = os.getenv("BLUR_FACE_WEIGHTS", "").strip()
@@ -195,28 +319,45 @@ class BlurEngine:
 
         try:
             from insightface.app import FaceAnalysis
+            import onnxruntime as ort
 
-            # Prefer CPU provider when CUDA onnxruntime is not installed (common on Kaggle)
-            providers = ["CPUExecutionProvider"]
-            try:
-                import onnxruntime as ort
+            available = list(ort.get_available_providers())
+            self._ort_providers = available
+            logger.info("[blur] onnxruntime providers=%s", available)
 
-                available = set(ort.get_available_providers())
-                if "CUDAExecutionProvider" in available and "cuda" in self._device:
-                    providers = ["CUDAExecutionProvider", "CPUExecutionProvider"]
-            except Exception:
-                pass
+            providers: List[str]
+            if (
+                self._cuda_available
+                and "cuda" in self._device
+                and "CUDAExecutionProvider" in available
+            ):
+                providers = ["CUDAExecutionProvider", "CPUExecutionProvider"]
+                self._insightface_on_gpu = True
+            else:
+                providers = ["CPUExecutionProvider"]
+                self._insightface_on_gpu = False
+                if self._cuda_available and "CUDAExecutionProvider" not in available:
+                    logger.warning(
+                        "[blur] CUDA torch OK but onnxruntime lacks CUDAExecutionProvider. "
+                        "Run: pip uninstall -y onnxruntime && pip install onnxruntime-gpu"
+                    )
+
             self._insightface = FaceAnalysis(
                 name=os.getenv("BLUR_INSIGHTFACE_MODEL", "buffalo_l"),
                 providers=providers,
             )
-            use_cuda = "cuda" in self._device
+            use_cuda = self._insightface_on_gpu
             self._insightface.prepare(ctx_id=0 if use_cuda else -1, det_size=(640, 640))
-            logger.info("[blur] InsightFace ctx_id=%s", 0 if use_cuda else -1)
-            logger.info("[blur] InsightFace loaded")
+            logger.info(
+                "[blur] InsightFace loaded ctx_id=%s on_gpu=%s providers=%s",
+                0 if use_cuda else -1,
+                self._insightface_on_gpu,
+                providers,
+            )
         except Exception as exc:
-            logger.warning("[blur] InsightFace unavailable (%s); using histogram fallback", exc)
+            logger.warning("[blur] InsightFace unavailable (%s)", exc)
             self._insightface = None
+            self._insightface_on_gpu = False
 
     def _histogram_embedding(self, face_bgr: np.ndarray) -> np.ndarray:
         small = cv2.resize(face_bgr, (64, 64), interpolation=cv2.INTER_AREA)
@@ -239,16 +380,12 @@ class BlurEngine:
         if not faces:
             return None
         if target_box is None:
-            return np.asarray(faces[0].embedding, dtype=np.float32)
+            return self._embedding_from_face_obj(faces[0])
         best_face = max(
             faces,
-            key=lambda f: _box_iou(
-                tuple(map(int, f.bbox[:4])),
-                target_box,
-            ),
+            key=lambda f: _box_iou(tuple(map(int, f.bbox[:4])), target_box),
         )
-        emb = getattr(best_face, "embedding", None)
-        return np.asarray(emb, dtype=np.float32) if emb is not None else None
+        return self._embedding_from_face_obj(best_face)
 
     def _embedding_for_face_region(
         self,
@@ -258,7 +395,6 @@ class BlurEngine:
         x2: int,
         y2: int,
     ) -> Optional[np.ndarray]:
-        """512-d InsightFace when available; histogram fallback only if InsightFace disabled."""
         h, w = frame.shape[:2]
         x1, y1 = max(0, x1), max(0, y1)
         x2, y2 = min(w, x2), min(h, y2)
@@ -274,16 +410,14 @@ class BlurEngine:
             emb = self._insightface_embedding_from_image(patch, target)
             if emb is not None:
                 return emb
-            emb = self._insightface_embedding_from_image(frame, target)
-            if emb is not None:
-                return emb
-            return None
+            return self._insightface_embedding_from_image(frame, target)
 
-        crop = frame[y1:y2, x1:x2]
-        return self._histogram_embedding(crop) if crop.size else None
+        if self._face_detect_mode == "heuristic":
+            crop = frame[y1:y2, x1:x2]
+            return self._histogram_embedding(crop) if crop.size else None
+        return None
 
     def _detect_face_boxes_insightface(self, image_bgr: np.ndarray) -> List[Tuple[int, int, int, int]]:
-        """InsightFace detector — best for reference portrait photos."""
         if self._insightface is None:
             return []
         boxes: List[Tuple[int, int, int, int]] = []
@@ -301,7 +435,6 @@ class BlurEngine:
         return boxes
 
     def _detect_face_boxes(self, image_bgr: np.ndarray) -> List[Tuple[int, int, int, int]]:
-        """Return face/person boxes as (x1,y1,x2,y2)."""
         boxes = self._detect_face_boxes_insightface(image_bgr)
         if boxes:
             return boxes
@@ -318,14 +451,12 @@ class BlurEngine:
                 continue
             for box in r.boxes.xyxy.cpu().numpy():
                 x1, y1, x2, y2 = map(int, box[:4])
-                w, h = x2 - x1, y2 - y1
-                if w < 20 or h < 20:
+                if x2 - x1 < 20 or y2 - y1 < 20:
                     continue
                 boxes.append((x1, y1, x2, y2))
         if boxes:
             return boxes
 
-        # Haar fallback for reference stills (cached classifier)
         if self._haar_cascade is not None:
             gray = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2GRAY)
             for (x, y, fw, fh) in self._haar_cascade.detectMultiScale(
@@ -335,8 +466,17 @@ class BlurEngine:
         return boxes
 
     def build_master_signatures(self, reference_dir: Path) -> np.ndarray:
-        """Average embeddings from all faces found in reference images."""
-        embeddings: List[np.ndarray] = []
+        """
+        One master embedding per reference image (mean of faces in that image).
+        Returns array shape (N, D), N = number of identities.
+        """
+        if self._face_detect_mode != "heuristic" and self._insightface is None:
+            raise ValueError(
+                "InsightFace is required for reference matching. "
+                "Install insightface + onnxruntime-gpu, or set BLUR_FACE_DETECT=heuristic for ablation only."
+            )
+
+        masters: List[np.ndarray] = []
         exts = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
         paths = sorted(p for p in reference_dir.iterdir() if p.suffix.lower() in exts)
         if not paths:
@@ -348,54 +488,56 @@ class BlurEngine:
                 logger.warning("[blur] Could not read reference image: %s", path)
                 continue
 
-            added_for_image = False
+            face_embs: List[np.ndarray] = []
             if self._insightface is not None:
                 try:
                     faces = self._insightface.get(img)
                     for face in faces or []:
-                        emb = getattr(face, "embedding", None)
+                        emb = self._embedding_from_face_obj(face)
                         if emb is not None:
-                            embeddings.append(np.asarray(emb, dtype=np.float32))
-                            added_for_image = True
+                            face_embs.append(emb)
                 except Exception as exc:
                     logger.warning("[blur] InsightFace embed on %s failed: %s", path.name, exc)
 
-            if not added_for_image:
+            if not face_embs and self._face_detect_mode == "heuristic":
                 for box in self._detect_face_boxes(img):
                     emb = self._embedding_for_face_region(img, *box)
                     if emb is not None:
-                        embeddings.append(emb)
-                        added_for_image = True
+                        face_embs.append(emb)
 
-            if not added_for_image:
+            if not face_embs:
                 logger.warning("[blur] No face found in reference: %s", path.name)
+                continue
 
-        if not embeddings:
+            master = np.mean(np.stack(face_embs, axis=0), axis=0)
+            master /= np.linalg.norm(master) + 1e-9
+            masters.append(master.astype(np.float32))
+            logger.info(
+                "[blur] Identity from %s: %d face(s) dim=%d",
+                path.name,
+                len(face_embs),
+                master.shape[0],
+            )
+
+        if not masters:
             raise ValueError(
                 "No faces detected in reference images. "
                 "Upload clear front-facing photos of the person(s) to blur."
             )
 
-        dims = {e.shape[0] for e in embeddings}
+        dims = {m.shape[0] for m in masters}
         if len(dims) > 1:
             raise ValueError(
-                f"Inconsistent embedding sizes {sorted(dims)} across reference images. "
-                "Use similar photo types or ensure InsightFace detects all references."
+                f"Inconsistent embedding sizes {sorted(dims)} across reference images."
             )
-        master = np.mean(np.stack(embeddings, axis=0), axis=0)
-        master /= np.linalg.norm(master) + 1e-9
-        logger.info(
-            "[blur] Master signature dim=%d from %d face(s) across %d file(s)",
-            master.shape[0],
-            len(embeddings),
-            len(paths),
-        )
-        return master.astype(np.float32)
+
+        out = np.stack(masters, axis=0)
+        logger.info("[blur] Built %d identity master(s) dim=%d", out.shape[0], out.shape[1])
+        return out
 
     def _person_face_region(
         self, frame: np.ndarray, px1: int, py1: int, px2: int, py2: int
     ) -> Tuple[int, int, int, int]:
-        """Heuristic face ROI inside a person box (upper ~45% + cached Haar). Fallback only."""
         ph = py2 - py1
         pw = px2 - px1
         fy2 = py1 + int(ph * 0.45)
@@ -415,7 +557,6 @@ class BlurEngine:
 
     @staticmethod
     def _embedding_from_face_obj(face) -> Optional[np.ndarray]:
-        """Prefer L2-normalized embedding from the same InsightFace.get() call."""
         emb = getattr(face, "normed_embedding", None)
         if emb is None:
             emb = getattr(face, "embedding", None)
@@ -437,10 +578,6 @@ class BlurEngine:
         *,
         pad_frac: float = 0.18,
     ) -> List[FaceHit]:
-        """
-        Run InsightFace SCRFD on a padded person crop; return faces in full-frame coords.
-        Only keeps faces whose center lies inside the person box.
-        """
         if self._insightface is None:
             return []
 
@@ -470,7 +607,6 @@ class BlurEngine:
             if bbox is None:
                 continue
             fx1, fy1, fx2, fy2 = map(int, bbox[:4])
-            # Map crop-local → full frame
             fx1, fy1, fx2, fy2 = fx1 + cx1, fy1 + cy1, fx2 + cx1, fy2 + cy1
             fw, fh = fx2 - fx1, fy2 - fy1
             if fw < min_px or fh < min_px:
@@ -497,23 +633,17 @@ class BlurEngine:
         px2: int,
         py2: int,
     ) -> FaceHit:
-        """
-        Primary: InsightFace SCRFD on person crop (score × area).
-        Fallback: heuristic upper-body / Haar ROI (no embedding).
-        """
         use_insight = (
             self._face_detect_mode != "heuristic" and self._insightface is not None
         )
         if use_insight:
             hits = self._faces_in_person_crop(frame, px1, py1, px2, py2)
             if hits:
-                best = max(
+                return max(
                     hits,
                     key=lambda hit: hit.det_score
                     * max(1, (hit.box[2] - hit.box[0]) * (hit.box[3] - hit.box[1])),
                 )
-                return best
-
         box = self._person_face_region(frame, px1, py1, px2, py2)
         return FaceHit(box=box, embedding=None, det_score=0.0)
 
@@ -521,7 +651,7 @@ class BlurEngine:
         self,
         video_path: Path,
         output_path: Path,
-        master: np.ndarray,
+        masters: np.ndarray,
         *,
         match_threshold: float = DEFAULT_MATCH_THRESHOLD,
         throttle: int = 3,
@@ -531,6 +661,11 @@ class BlurEngine:
         end_sec: Optional[float] = None,
         progress_cb: Optional[Callable[[float, str], None]] = None,
     ) -> Dict[str, object]:
+        if masters.ndim == 1:
+            masters = masters.reshape(1, -1)
+        if masters.ndim != 2 or masters.shape[0] < 1:
+            raise ValueError("masters must be shape (N, D) with N>=1")
+
         cap = cv2.VideoCapture(str(video_path))
         if not cap.isOpened():
             raise ValueError(f"Cannot open video: {video_path}")
@@ -556,34 +691,45 @@ class BlurEngine:
         active_tracks: Dict[int, int] = {}
         match_streak: Dict[int, int] = {}
         locked_targets: Set[int] = set()
+        tracks_ever_locked: Set[int] = set()
+        # tid -> (master_index, last_emb, last_box) for re-attach after ID switch
+        lock_identity: Dict[int, int] = {}
+        pending_reattach: List[Dict[str, object]] = []
+
         frame_idx = 0
         processed = 0
         throttle = max(1, int(throttle))
         grace = max(1, int(grace))
         min_streak = max(1, int(min_match_streak))
-        use_half = "cuda" in self._device
-        master_dim = int(master.shape[0])
+        master_dim = int(masters.shape[1])
+        num_identities = int(masters.shape[0])
         duration_est = total_frames / max(fps, 1.0)
+
+        # Soften auto-throttle (cap for long videos)
         if duration_est > 300:
-            throttle = max(throttle, 10)
+            throttle = max(throttle, min(self._max_throttle, 4))
         elif duration_est > 120:
-            throttle = max(throttle, 6)
+            throttle = max(throttle, min(self._max_throttle, 3))
         elif duration_est > 60:
-            throttle = max(throttle, 4)
+            throttle = max(throttle, min(self._max_throttle, 3))
+        throttle = min(throttle, self._max_throttle)
 
         infer_max = int(os.getenv("BLUR_INFER_MAX_DIM", "960"))
         last_face_boxes: Dict[int, Tuple[int, int, int, int]] = {}
+        last_embeddings: Dict[int, np.ndarray] = {}
         frames_to_process = max(1, end_frame - start_frame)
 
         logger.info(
-            "[blur] match_threshold=%.2f min_streak=%d throttle=%d device=%s "
-            "face_detect=%s min_face_px=%d ~%.0fs video",
+            "[blur] identities=%d match_threshold=%.2f min_streak=%d throttle=%d "
+            "device=%s face_detect=%s operator=%s on_gpu_if=%s ~%.0fs video",
+            num_identities,
             match_threshold,
             min_streak,
             throttle,
             self._device,
             self._face_detect_mode if self._insightface is not None else "heuristic",
-            self._min_face_px,
+            self._operator,
+            self._insightface_on_gpu,
             duration_est,
         )
 
@@ -591,6 +737,12 @@ class BlurEngine:
             if progress_cb and frames_to_process > 0:
                 pct = min(99.0, (processed / frames_to_process) * 100.0)
                 progress_cb(pct, "Processing frames")
+
+        def _blur_box(frame: np.ndarray, box: Tuple[int, int, int, int]) -> None:
+            fx1, fy1, fx2, fy2 = box
+            _apply_face_anonymize(
+                frame, fx1, fy1, fx2, fy2, operator=self._operator
+            )
 
         while True:
             ok, frame = cap.read()
@@ -606,11 +758,7 @@ class BlurEngine:
                     for tid in locked_targets:
                         box = last_face_boxes.get(tid)
                         if box:
-                            fx1, fy1, fx2, fy2 = box
-                            pad = int(0.08 * max(fx2 - fx1, fy2 - fy1))
-                            _gaussian_blur_roi(
-                                frame, fx1 - pad, fy1 - pad, fx2 + pad, fy2 + pad
-                            )
+                            _blur_box(frame, box)
                 elif run_detect:
                     infer_frame = frame
                     scale = 1.0
@@ -628,13 +776,15 @@ class BlurEngine:
                         persist=True,
                         verbose=False,
                         device=self._device,
-                        half=use_half,
                         classes=[0],
                         tracker=os.getenv("BLUR_TRACKER", "botsort.yaml"),
                         imgsz=640,
                     )
                     current_ids: Set[int] = set()
-                    frame_candidates: List[Tuple[int, float]] = []
+                    # All candidates that match this frame (multi-lock)
+                    frame_matches: List[Tuple[int, float, int, Optional[np.ndarray]]] = []
+
+                    track_face: Dict[int, FaceHit] = {}
 
                     for r in results:
                         if r.boxes is None or r.boxes.id is None:
@@ -655,57 +805,105 @@ class BlurEngine:
                             face_hit = self._best_face_for_person(
                                 frame, px1, py1, px2, py2
                             )
-                            fx1, fy1, fx2, fy2 = face_hit.box
-                            last_face_boxes[tid] = (fx1, fy1, fx2, fy2)
+                            track_face[tid] = face_hit
+                            last_face_boxes[tid] = face_hit.box
 
                             if tid in locked_targets:
-                                # Locked: refresh face box only; skip re-ID embed.
-                                pad = int(0.08 * max(fx2 - fx1, fy2 - fy1))
-                                _gaussian_blur_roi(
-                                    frame, fx1 - pad, fy1 - pad, fx2 + pad, fy2 + pad
-                                )
+                                _blur_box(frame, face_hit.box)
                                 continue
 
                             if frame_idx % throttle != 0:
                                 continue
 
-                            # Prefer embedding from the same SCRFD get(); else re-embed ROI.
                             emb = face_hit.embedding
                             if emb is None or emb.shape[0] != master_dim:
                                 emb = self._embedding_for_face_region(
-                                    frame, fx1, fy1, fx2, fy2
+                                    frame, *face_hit.box
                                 )
                             if emb is None or emb.shape[0] != master_dim:
                                 match_streak[tid] = 0
                                 continue
-                            sim = _cosine_similarity(master, emb)
+
+                            last_embeddings[tid] = emb
+                            sim, mid = _max_sim_to_masters(emb, masters)
                             if sim >= match_threshold:
-                                frame_candidates.append((tid, sim))
+                                frame_matches.append((tid, sim, mid, emb))
                             else:
                                 match_streak[tid] = 0
 
-                    if frame_idx % throttle == 0 and frame_candidates:
-                        frame_candidates.sort(key=lambda x: x[1], reverse=True)
-                        best_tid, best_sim = frame_candidates[0]
-                        second_sim = (
-                            frame_candidates[1][1] if len(frame_candidates) > 1 else 0.0
-                        )
-                        if len(frame_candidates) == 1 or (best_sim - second_sim) >= 0.05:
-                            match_streak[best_tid] = match_streak.get(best_tid, 0) + 1
-                            if match_streak[best_tid] >= min_streak:
-                                locked_targets.add(best_tid)
-                                active_tracks[best_tid] = 0
-                        for tid, _ in frame_candidates[1:]:
-                            if tid != best_tid:
+                    # Re-attach: new tracks that match a recently lost locked identity
+                    if frame_idx % throttle == 0 and pending_reattach:
+                        still_pending: List[Dict[str, object]] = []
+                        for pend in pending_reattach:
+                            pend["miss"] = int(pend["miss"]) + detect_interval
+                            if int(pend["miss"]) > grace:
+                                continue
+                            claimed = False
+                            for tid, sim, mid, emb in frame_matches:
+                                if tid in locked_targets:
+                                    continue
+                                if mid != int(pend["master_idx"]):
+                                    continue
+                                last_box = pend["box"]  # type: ignore[assignment]
+                                new_box = track_face[tid].box
+                                iou = _box_iou(new_box, last_box)  # type: ignore[arg-type]
+                                # Spatial gate: IoU or nearby centers (occlusion / ID switch)
+                                max_side = max(
+                                    last_box[2] - last_box[0],  # type: ignore[index]
+                                    last_box[3] - last_box[1],  # type: ignore[index]
+                                    1,
+                                )
+                                near = _box_center_dist(new_box, last_box) <= 1.5 * max_side  # type: ignore[arg-type]
+                                if sim >= match_threshold and (iou >= 0.1 or near):
+                                    locked_targets.add(tid)
+                                    tracks_ever_locked.add(tid)
+                                    lock_identity[tid] = mid
+                                    active_tracks[tid] = 0
+                                    match_streak[tid] = min_streak
+                                    _blur_box(frame, track_face[tid].box)
+                                    claimed = True
+                                    break
+                            if not claimed:
+                                still_pending.append(pend)
+                        pending_reattach = still_pending
+
+                    # Multi-lock: every matching track increments its own streak
+                    if frame_idx % throttle == 0:
+                        matched_ids = {t for t, _, _, _ in frame_matches}
+                        for tid, sim, mid, emb in frame_matches:
+                            if tid in locked_targets:
+                                continue
+                            match_streak[tid] = match_streak.get(tid, 0) + 1
+                            if match_streak[tid] >= min_streak:
+                                locked_targets.add(tid)
+                                tracks_ever_locked.add(tid)
+                                lock_identity[tid] = mid
+                                active_tracks[tid] = 0
+                                _blur_box(frame, track_face[tid].box)
+                        for tid in list(match_streak.keys()):
+                            if tid not in matched_ids and tid not in locked_targets:
                                 match_streak[tid] = 0
 
                     for tid in list(locked_targets):
                         if tid not in current_ids:
                             active_tracks[tid] = active_tracks.get(tid, 0) + detect_interval
                             if active_tracks[tid] > grace:
+                                mid = lock_identity.get(tid, 0)
+                                box = last_face_boxes.get(tid)
+                                emb = last_embeddings.get(tid)
+                                if box is not None:
+                                    pending_reattach.append(
+                                        {
+                                            "master_idx": mid,
+                                            "box": box,
+                                            "emb": emb,
+                                            "miss": 0,
+                                        }
+                                    )
                                 locked_targets.discard(tid)
                                 active_tracks.pop(tid, None)
                                 match_streak.pop(tid, None)
+                                lock_identity.pop(tid, None)
                                 last_face_boxes.pop(tid, None)
 
             writer.write(frame)
@@ -721,20 +919,23 @@ class BlurEngine:
         if progress_cb:
             progress_cb(99.0, "Encoding output")
 
-        final_path = output_path
         if _transcode_for_browser(raw_path, output_path):
             try:
                 raw_path.unlink(missing_ok=True)
             except Exception:
                 pass
         else:
-            logger.warning("[blur] FFmpeg transcode failed; using raw mp4v (may not play in browser)")
+            logger.warning(
+                "[blur] FFmpeg transcode failed; using raw mp4v (may not play in browser)"
+            )
             if raw_path.exists() and not output_path.exists():
                 raw_path.replace(output_path)
 
         duration_sec = processed / fps if fps > 0 else 0.0
         return {
             "target_ids_blurred": len(locked_targets),
+            "tracks_ever_locked": len(tracks_ever_locked),
+            "num_identities": num_identities,
             "total_frames": processed,
             "fps": fps,
             "width": width,
@@ -742,6 +943,8 @@ class BlurEngine:
             "video_duration_sec": round(duration_sec, 2),
             "match_threshold": match_threshold,
             "device": self._device,
+            "insightface_on_gpu": self._insightface_on_gpu,
+            "operator": self._operator,
             "browser_ready": output_path.exists(),
         }
 
@@ -751,6 +954,44 @@ def get_blur_engine() -> BlurEngine:
     if _ENGINE is None:
         _ENGINE = BlurEngine()
     return _ENGINE
+
+
+def blur_gpu_status() -> Dict[str, object]:
+    """GPU / ORT status without forcing full engine load if already loaded."""
+    if _ENGINE is not None:
+        return _ENGINE.gpu_status()
+    # Lightweight probe without loading YOLO/InsightFace weights
+    status: Dict[str, object] = {
+        "blur_device": os.getenv("BLUR_DEVICE", ""),
+        "cuda_available": False,
+        "cuda_name": "",
+        "ort_providers": [],
+        "insightface_on_gpu": False,
+        "insightface_loaded": False,
+        "require_gpu": _require_gpu(),
+        "engine_loaded": False,
+    }
+    try:
+        import torch
+
+        status["cuda_available"] = bool(torch.cuda.is_available())
+        if status["cuda_available"]:
+            status["cuda_name"] = torch.cuda.get_device_name(0)
+            if not status["blur_device"]:
+                status["blur_device"] = "cuda:0"
+    except Exception:
+        pass
+    try:
+        import onnxruntime as ort
+
+        status["ort_providers"] = list(ort.get_available_providers())
+        status["insightface_on_gpu"] = (
+            status["cuda_available"]
+            and "CUDAExecutionProvider" in status["ort_providers"]
+        )
+    except Exception:
+        pass
+    return status
 
 
 def anonymize_video(
@@ -766,19 +1007,15 @@ def anonymize_video(
     end_sec: Optional[float] = None,
     progress_cb: Optional[Callable[[float, str], None]] = None,
 ) -> Dict[str, object]:
-    """
-    Blur faces in video that match person(s) in reference images.
-
-    Returns dict with target_ids_blurred, total_frames, processing_time_sec, etc.
-    """
+    """Blur faces in video that match person(s) in reference images."""
     t0 = time.perf_counter()
     with _PROCESS_LOCK:
         engine = get_blur_engine()
-        master = engine.build_master_signatures(reference_dir)
+        masters = engine.build_master_signatures(reference_dir)
         stats = engine.process_video(
             video_path,
             output_path,
-            master,
+            masters,
             match_threshold=match_threshold,
             throttle=throttle,
             grace=grace,
@@ -805,7 +1042,7 @@ if __name__ == "__main__":
     parser.add_argument("--video", type=Path, required=True)
     parser.add_argument("--refs", type=Path, required=True, help="Directory of reference images")
     parser.add_argument("--output", type=Path, required=True)
-    parser.add_argument("--threshold", type=float, default=0.65)
+    parser.add_argument("--threshold", type=float, default=DEFAULT_MATCH_THRESHOLD)
     args = parser.parse_args()
     out = anonymize_video(
         args.video,

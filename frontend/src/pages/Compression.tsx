@@ -66,8 +66,8 @@ export default function Compression() {
         formData.append('user_id', user.id);
       }
 
-      const API_BASE = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8040';
-      
+      const { API_BASE } = await import('@/lib/apiBase');
+
       // Use XMLHttpRequest for upload progress
       const xhr = new XMLHttpRequest();
       

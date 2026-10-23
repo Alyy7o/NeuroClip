@@ -11,7 +11,7 @@ import { useToast } from '@/hooks/use-toast'
 import { supabase } from '@/integrations/supabase/client'
 import { clipDescription } from '@/lib/clipText'
 
-const API_BASE = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8040'
+import { API_BASE } from '@/lib/apiBase'
 
 export default function VideoClips() {
   const { id } = useParams()

@@ -16,7 +16,7 @@ import { useToast } from '@/hooks/use-toast';
 import { useAuth } from '@/contexts/AuthContext';
 import { z } from 'zod';
 
-const API_BASE = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8040';
+import { API_BASE } from '@/lib/apiBase';
 
 type ClipItem = {
   rank: number;

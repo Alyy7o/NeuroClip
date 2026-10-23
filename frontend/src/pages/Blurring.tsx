@@ -20,8 +20,7 @@ import {
   failProcessingHistory,
 } from '@/lib/processingHistory';
 import { z } from 'zod';
-
-const API_BASE = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8040';
+import { API_BASE, NGROK_HEADERS } from '@/lib/apiBase';
 
 const processingSchema = z.object({
   query: z.string().trim().max(1000, { message: 'Query must be less than 1000 characters' }).optional(),
@@ -81,11 +80,23 @@ export default function Blurring() {
     let historyId: string | null = null;
 
     try {
-      const healthResp = await fetch(`${API_BASE}/health`, {
-        headers: { 'ngrok-skip-browser-warning': 'true' },
-      });
+      let healthResp: Response;
+      try {
+        healthResp = await fetch(`${API_BASE}/health`, { headers: NGROK_HEADERS });
+      } catch {
+        throw new Error(
+          `Cannot reach backend at ${API_BASE}. ` +
+            'Check Kaggle uvicorn is running, ngrok is live, and frontend/.env VITE_API_BASE_URL matches the new ngrok URL (no spaces). Restart npm run dev after editing .env.'
+        );
+      }
       const healthData = healthResp.ok ? await healthResp.json() : {};
-      if (healthResp.ok && healthData.has_anonymize_endpoint !== true) {
+      if (!healthResp.ok) {
+        throw new Error(
+          `Backend /health returned HTTP ${healthResp.status} at ${API_BASE}. ` +
+            'Update VITE_API_BASE_URL to the current ngrok URL and restart the Vite dev server.'
+        );
+      }
+      if (healthData.has_anonymize_endpoint !== true) {
         throw new Error(
           'Blur API is not available on this server (outdated backend). ' +
             'Restart your Kaggle notebook with the latest NeuroClip code, then update VITE_API_BASE_URL to the new ngrok URL.'
@@ -166,7 +177,12 @@ export default function Blurring() {
           }
         };
 
-        xhr.onerror = () => reject(new Error('Network error during upload'));
+        xhr.onerror = () =>
+          reject(
+            new Error(
+              `Network error uploading to ${API_BASE}. Ngrok tunnel may have died — restart tunnel and update .env.`
+            )
+          );
         xhr.open('POST', `${API_BASE}/anonymize-video`);
         xhr.setRequestHeader('ngrok-skip-browser-warning', 'true');
         xhr.send(formData);
@@ -189,7 +205,7 @@ export default function Blurring() {
         for (let i = 0; i < maxPolls; i++) {
           await new Promise((r) => setTimeout(r, pollInterval));
           const statusResp = await fetch(`${API_BASE}/anonymize-status/${jobId}`, {
-            headers: { 'ngrok-skip-browser-warning': 'true' },
+            headers: NGROK_HEADERS,
           });
           if (!statusResp.ok) {
             throw new Error('Lost connection to blur job status');

@@ -15,7 +15,7 @@ import {
   resolveMediaPath,
 } from '@/lib/historyMedia';
 
-const API_BASE = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8040';
+import { API_BASE } from '@/lib/apiBase';
 
 const moduleLabels: Record<string, string> = {
   summarization: 'Summarization',

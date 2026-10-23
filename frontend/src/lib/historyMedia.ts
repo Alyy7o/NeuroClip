@@ -1,4 +1,4 @@
-const API_BASE = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8040';
+import { API_BASE } from '@/lib/apiBase';
 
 /** Prefer completed when output exists; never downgrade completed → processing. */
 export function effectiveHistoryStatus(

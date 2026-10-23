@@ -6,7 +6,7 @@ import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card';
 import { Download, ArrowLeft } from 'lucide-react';
 
-const API_BASE = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8040';
+import { API_BASE } from '@/lib/apiBase';
 
 export default function DownloadClip() {
     const [params] = useSearchParams();

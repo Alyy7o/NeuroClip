@@ -274,7 +274,9 @@ class BlurEngine:
         if self._insightface is not None and not self._insightface_on_gpu:
             problems.append(
                 "InsightFace has no CUDAExecutionProvider "
-                "(pip uninstall onnxruntime && pip install onnxruntime-gpu)"
+                "(Kaggle CUDA12: pip uninstall -y onnxruntime onnxruntime-gpu && "
+                "pip install onnxruntime-gpu==1.19.2 — NOT 1.31/CUDA13 — then restart kernel; "
+                "or %run install_kaggle_blur_gpu.py)"
             )
         if self._insightface is None and self._face_detect_mode != "heuristic":
             problems.append("InsightFace failed to load")
@@ -321,9 +323,19 @@ class BlurEngine:
             from insightface.app import FaceAnalysis
             import onnxruntime as ort
 
+            # Pull CUDA/cuDNN libs from the torch / nvidia-* wheel tree when possible.
+            try:
+                if hasattr(ort, "preload_dlls"):
+                    ort.preload_dlls()
+            except Exception as preload_exc:
+                logger.warning("[blur] ort.preload_dlls failed: %s", preload_exc)
+
             available = list(ort.get_available_providers())
             self._ort_providers = available
-            logger.info("[blur] onnxruntime providers=%s", available)
+            ort_ver = getattr(ort, "__version__", "?")
+            logger.info(
+                "[blur] onnxruntime %s providers=%s", ort_ver, available
+            )
 
             providers: List[str]
             if (
@@ -338,8 +350,13 @@ class BlurEngine:
                 self._insightface_on_gpu = False
                 if self._cuda_available and "CUDAExecutionProvider" not in available:
                     logger.warning(
-                        "[blur] CUDA torch OK but onnxruntime lacks CUDAExecutionProvider. "
-                        "Run: pip uninstall -y onnxruntime && pip install onnxruntime-gpu"
+                        "[blur] CUDA torch OK but onnxruntime %s lacks CUDAExecutionProvider "
+                        "(providers=%s). Kaggle/CUDA12 fix: pip uninstall -y onnxruntime "
+                        "onnxruntime-gpu && pip install onnxruntime-gpu==1.19.2 "
+                        "(or %%run install_kaggle_blur_gpu.py), then RESTART kernel. "
+                        "onnxruntime-gpu>=1.27 needs CUDA 13 and will not work on Kaggle T4.",
+                        ort_ver,
+                        available,
                     )
 
             self._insightface = FaceAnalysis(
@@ -984,6 +1001,12 @@ def blur_gpu_status() -> Dict[str, object]:
     try:
         import onnxruntime as ort
 
+        try:
+            if hasattr(ort, "preload_dlls"):
+                ort.preload_dlls()
+        except Exception:
+            pass
+        status["ort_version"] = getattr(ort, "__version__", "")
         status["ort_providers"] = list(ort.get_available_providers())
         status["insightface_on_gpu"] = (
             status["cuda_available"]

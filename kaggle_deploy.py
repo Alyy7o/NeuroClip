@@ -1,47 +1,85 @@
-# Kaggle Deployment Script for NeuroClip Backend (summarization + compression + blur)
-# MUST use a GPU notebook: Accel = GPU T4 x2 (CPU takes ~1h for a ~17s blur job).
+# Kaggle Deployment Script for NeuroClip Backend
+# Accel MUST be: GPU T4 x2 (CPU blur ≈ 1h for a 17s clip).
 #
-# --- Cell 0: Confirm GPU ---
+# =============================================================================
+# PASTE THIS AS YOUR SETUP CELL (order matters — ORT pin LAST)
+# =============================================================================
+#
+# import os, shutil
+#
+# # 0) Clean + clone
+# repo_path = "/kaggle/working/NeuroClip"
+# if os.path.exists(repo_path):
+#     shutil.rmtree(repo_path)
+# !git clone https://github.com/Alyy7o/NeuroClip.git
+#
+# # 1) Deps (insightface may pull CPU onnxruntime — that is OK for now)
+# %cd /kaggle/working/NeuroClip/backend/Semantic-search-app/backend
+# !pip install -r requirements.txt
+# !pip install -r requirements-blur.txt
+#
+# # 2) CRITICAL — pin CUDA-12 ORT AFTER requirements (Kaggle ≠ CUDA 13)
+# #    Bare `pip install onnxruntime-gpu` → 1.31 / CUDA13 → no CUDAExecutionProvider
+# %run /kaggle/working/NeuroClip/backend/Semantic-search-app/backend/install_kaggle_blur_gpu.py
+# # (same as: pip uninstall -y onnxruntime onnxruntime-gpu && pip install onnxruntime-gpu==1.19.2)
+#
+# # 3) Env for blur GPU fail-fast
+# os.environ["BLUR_DEVICE"] = "cuda:0"
+# os.environ["BLUR_REQUIRE_GPU"] = "1"
+# # optional weights dataset:
+# # os.environ["BLUR_YOLO_WEIGHTS"] = "/kaggle/input/neuroclip-blur-weights/yolov8n.pt"
+#
+# # 4) Verify (must print CUDAExecutionProvider)
 # import torch, onnxruntime as ort
 # print("cuda:", torch.cuda.is_available(), torch.cuda.get_device_name(0) if torch.cuda.is_available() else None)
-# print("ort providers:", ort.get_available_providers())
-# # Expect: cuda True + 'CUDAExecutionProvider' in providers AFTER Cell 1
+# print("ort:", ort.__version__, ort.get_available_providers())
+# !nvidia-smi
 #
-# --- Cell 1: Install dependencies (order matters for InsightFace GPU) ---
-# !pip install -r /kaggle/working/NeuroClip/backend/Semantic-search-app/backend/requirements.txt
-# !pip install -r /kaggle/working/NeuroClip/backend/Semantic-search-app/backend/requirements-blur.txt
-# !pip uninstall -y onnxruntime onnxruntime-gpu
-# !pip install onnxruntime-gpu
+# # 5) RESTART KERNEL now, then run the SERVER cell below (do not skip restart)
+#
+# =============================================================================
+# SERVER CELL (after kernel restart — set env again, then uvicorn + ngrok)
+# =============================================================================
+#
 # import os
 # os.environ["BLUR_DEVICE"] = "cuda:0"
-# # On Kaggle, BLUR_REQUIRE_GPU defaults on — fail fast if still CPU-only
 # os.environ["BLUR_REQUIRE_GPU"] = "1"
-# !pip install pyngrok
-#
-# --- Cell 2: Verify environment ---
-# %run /kaggle/working/NeuroClip/backend/Semantic-search-app/backend/verify_env.py
-# # Must show CUDAExecutionProvider and torch.cuda True, else blur will be unusable
-#
-# --- Cell 3: Blur model weights (optional dataset) ---
-# import os
-# os.environ["BLUR_YOLO_WEIGHTS"] = "/kaggle/input/neuroclip-blur-weights/yolov8n.pt"
-# os.environ["BLUR_DEVICE"] = "cuda:0"
-#
-# --- Cell 4: Start FastAPI (port 8000 — NOT Flask :5000) ---
-# IMPORTANT: Restart kernel after pulling new code or /anonymize-video will 404.
 # %cd /kaggle/working/NeuroClip/backend/Semantic-search-app/backend
-# !uvicorn main:app --host 0.0.0.0 --port 8000
-# Verify: curl -H "ngrok-skip-browser-warning: true" $NGROK_URL/health
-#   must show has_anonymize_endpoint=true AND insightface_on_gpu=true (after first blur load)
 #
-# --- Cell 5: Ngrok tunnel (point at 8000) ---
-import os
-from pyngrok import ngrok
+# # Start API in background, then tunnel:
+# import subprocess, time
+# subprocess.Popen(["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"])
+# time.sleep(5)
+#
+# from kaggle_secrets import UserSecretsClient  # preferred
+# # token = UserSecretsClient().get_secret("NGROK_AUTH_TOKEN")
+# # Or: export NGROK_AUTH_TOKEN in the cell env — do NOT hardcode tokens in git
+#
+# from pyngrok import ngrok
+# ngrok.kill()
+# ngrok.set_auth_token(os.environ["NGROK_AUTH_TOKEN"])
+# public_url = ngrok.connect(8000).public_url
+# print("Backend URL:", public_url)
+# print("Set frontend .env: VITE_API_BASE_URL=" + public_url)
+#
+# =============================================================================
 
-NGROK_AUTH_TOKEN = os.environ.get("NGROK_AUTH_TOKEN", "YOUR_NGROK_AUTH_TOKEN")
+import os
+
+try:
+    from pyngrok import ngrok
+except ImportError as exc:  # pragma: no cover
+    raise SystemExit("pip install pyngrok first") from exc
+
+NGROK_AUTH_TOKEN = os.environ.get("NGROK_AUTH_TOKEN", "").strip()
 
 
 def start_tunnel(port: int = 8000):
+    if not NGROK_AUTH_TOKEN or NGROK_AUTH_TOKEN == "YOUR_NGROK_AUTH_TOKEN":
+        raise RuntimeError(
+            "Set NGROK_AUTH_TOKEN env (Kaggle Secrets → NGROK_AUTH_TOKEN). "
+            "Do not hardcode the token in the notebook if you can avoid it."
+        )
     try:
         for t in ngrok.get_tunnels():
             ngrok.disconnect(t.public_url)
@@ -54,17 +92,13 @@ def start_tunnel(port: int = 8000):
     public_url = ngrok.connect(port).public_url
     print("\n" + "=" * 50)
     print(f" * Backend is live at: {public_url}")
-    print(f" * Tunnel target: http://localhost:{port}  (use 8000 for uvicorn, NOT 5000 Flask)")
+    print(f" * Tunnel target: http://localhost:{port}  (uvicorn :8000, NOT Flask :5000)")
     print(" * Set frontend .env: VITE_API_BASE_URL=" + public_url)
     print(" * Endpoints: /upload-and-search, /compress-video, /anonymize-video")
-    print(" * Health should report insightface_on_gpu after engine load")
+    print(" * /health should show insightface_on_gpu after first blur engine load")
     print("=" * 50 + "\n")
     return public_url
 
 
 if __name__ == "__main__":
     start_tunnel()
-
-# --- Cell 6 (optional): smoke-test blur ---
-# curl -X POST "$NGROK_URL/anonymize-video" -H "ngrok-skip-browser-warning: true" \
-#   -F "file=@test.mp4" -F "reference_images=@person.jpg"

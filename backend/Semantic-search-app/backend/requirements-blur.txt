@@ -1,9 +1,18 @@
-# GPU blur overlay — install on Kaggle GPU notebooks (Accel = GPU T4 x2):
+# GPU blur overlay — Kaggle GPU notebooks (Accel = GPU T4 x2):
+#
 #   pip install -r requirements.txt -r requirements-blur.txt
+#   # IMPORTANT: default onnxruntime-gpu 1.27+ needs CUDA 13; Kaggle is CUDA 12.
+#   # Use the helper (preferred):
+#   %run install_kaggle_blur_gpu.py
+#   # Or manually:
 #   pip uninstall -y onnxruntime onnxruntime-gpu
-#   pip install onnxruntime-gpu
+#   pip install onnxruntime-gpu==1.19.2
+#   # Restart kernel, then:
 #   export BLUR_DEVICE=cuda:0
-# Plain `onnxruntime` (CPU EP only) silently keeps InsightFace on CPU (~1h / 17s clip).
+#   python -c "import onnxruntime as ort; print(ort.get_available_providers())"
+#   # Must include CUDAExecutionProvider before starting uvicorn
+#
 ultralytics>=8.0.0
 insightface>=0.7.3
-onnxruntime-gpu>=1.16.0
+# Pin CUDA-12 wheel for Kaggle T4. Do not bump to 1.27+ without CUDA 13.
+onnxruntime-gpu==1.19.2

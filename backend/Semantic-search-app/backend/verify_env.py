@@ -11,8 +11,9 @@ Usage (in a Kaggle notebook cell):
 Blur GPU install order (required on Kaggle T4):
     1. Notebook Accel = GPU T4 x2
     2. pip install -r requirements.txt -r requirements-blur.txt
-    3. pip uninstall -y onnxruntime onnxruntime-gpu
-    4. pip install onnxruntime-gpu
+    3. %run install_kaggle_blur_gpu.py   # pins onnxruntime-gpu==1.19.2 (CUDA 12)
+       # DO NOT use bare `pip install onnxruntime-gpu` (1.27+ = CUDA 13 → no EP)
+    4. Restart kernel
     5. export BLUR_DEVICE=cuda:0  (and BLUR_REQUIRE_GPU=1)
     6. This script must show CUDAExecutionProvider + torch.cuda True
     7. uvicorn main:app --host 0.0.0.0 --port 8000
@@ -116,7 +117,15 @@ except Exception as e:
 try:
     import onnxruntime as ort
 
+    try:
+        if hasattr(ort, "preload_dlls"):
+            ort.preload_dlls()
+    except Exception as e:
+        print(f"    ·  ort.preload_dlls: {e}")
+
     providers = list(ort.get_available_providers())
+    ort_ver = getattr(ort, "__version__", "?")
+    print(f"    onnxruntime version: {ort_ver}")
     print(f"    ort providers: {providers}")
     ort_cuda_ok = "CUDAExecutionProvider" in providers
     if ort_cuda_ok:
@@ -124,7 +133,9 @@ try:
     else:
         print(
             "    ✗  CUDAExecutionProvider MISSING — "
-            "pip uninstall -y onnxruntime && pip install onnxruntime-gpu"
+            "run: %run install_kaggle_blur_gpu.py  "
+            "(pin onnxruntime-gpu==1.19.2 for CUDA 12; "
+            f"current {ort_ver} may be a CUDA-13 wheel)"
         )
 except Exception as e:
     print(f"    onnxruntime not available: {e}")
@@ -174,7 +185,8 @@ if _on_kaggle() and blur_deps_ok:
         gpu_fail = True
         print(
             "\n    ❌  FAIL: On Kaggle with blur deps but CUDAExecutionProvider absent. "
-            "pip uninstall -y onnxruntime onnxruntime-gpu && pip install onnxruntime-gpu"
+            "Run: %run install_kaggle_blur_gpu.py  "
+            "(pins onnxruntime-gpu==1.19.2 for CUDA 12; bare latest is CUDA 13)."
         )
     if not gpu_fail:
         print("\n    ✅  Kaggle GPU path OK for blur (torch CUDA + ORT CUDA EP)")

@@ -48,6 +48,39 @@ class FaceHit(NamedTuple):
     box: Tuple[int, int, int, int]
     embedding: Optional[np.ndarray]
     det_score: float
+    yaw: float = 0.0  # InsightFace pose yaw (deg); |yaw| high ⇒ profile/side view
+
+
+def _face_yaw_deg(face) -> float:
+    """Best-effort yaw from InsightFace face object (degrees)."""
+    pose = getattr(face, "pose", None)
+    if pose is not None:
+        try:
+            arr = np.asarray(pose, dtype=np.float32).ravel()
+            if arr.size >= 2:
+                return float(arr[1])  # pitch, yaw, roll — yaw is index 1 in insightface
+            if arr.size == 1:
+                return float(arr[0])
+        except Exception:
+            pass
+    yaw = getattr(face, "yaw", None)
+    if yaw is not None:
+        try:
+            return float(yaw)
+        except Exception:
+            pass
+    return 0.0
+
+
+def _effective_match_threshold(base: float, yaw_deg: float) -> float:
+    """Relax cosine threshold for profile / high-yaw faces."""
+    yaw = abs(float(yaw_deg))
+    delta = float(os.getenv("BLUR_PROFILE_THRESHOLD_DELTA", "0.10"))
+    if yaw >= 50:
+        return max(0.55, base - delta)
+    if yaw >= 30:
+        return max(0.58, base - 0.6 * delta)
+    return base
 
 
 def _on_kaggle() -> bool:
@@ -79,16 +112,40 @@ def _resolve_ffmpeg() -> Optional[str]:
         return None
 
 
-def _transcode_for_browser(src: Path, dst: Path) -> bool:
-    """H.264 + AAC for HTML5 playback (OpenCV mp4v is not browser-compatible)."""
+def _transcode_for_browser(
+    src: Path,
+    dst: Path,
+    *,
+    audio_src: Optional[Path] = None,
+    audio_start_sec: Optional[float] = None,
+    audio_end_sec: Optional[float] = None,
+) -> bool:
+    """
+    H.264 for HTML5 playback. OpenCV raw has no audio — mux audio from the
+    original input when available.
+    """
     ff = _resolve_ffmpeg()
     if not ff or not src.exists():
         return False
-    cmd = [
-        ff,
-        "-y",
-        "-i",
-        str(src),
+
+    timeout_sec = int(os.getenv("BLUR_FFMPEG_TIMEOUT", "1800"))
+    has_audio = bool(audio_src and Path(audio_src).exists())
+
+    def _run(cmd: List[str]) -> bool:
+        try:
+            proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout_sec)
+            if proc.returncode != 0:
+                logger.warning(
+                    "[blur] FFmpeg failed (rc=%s): %s",
+                    proc.returncode,
+                    (proc.stderr or "")[-800:],
+                )
+            return proc.returncode == 0 and dst.exists() and dst.stat().st_size > 0
+        except Exception as exc:
+            logger.warning("[blur] FFmpeg transcode failed: %s", exc)
+            return False
+
+    video_encode = [
         "-c:v",
         "libx264",
         "-preset",
@@ -97,21 +154,41 @@ def _transcode_for_browser(src: Path, dst: Path) -> bool:
         "23",
         "-pix_fmt",
         "yuv420p",
-        "-c:a",
-        "aac",
-        "-b:a",
-        "128k",
         "-movflags",
         "+faststart",
-        str(dst),
     ]
-    try:
-        timeout_sec = int(os.getenv("BLUR_FFMPEG_TIMEOUT", "1800"))
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout_sec)
-        return proc.returncode == 0 and dst.exists() and dst.stat().st_size > 0
-    except Exception as exc:
-        logger.warning("[blur] FFmpeg transcode failed: %s", exc)
-        return False
+
+    if has_audio:
+        # Video from processed raw; audio from original (optional trim).
+        cmd: List[str] = [ff, "-y", "-i", str(src)]
+        if audio_start_sec is not None and audio_start_sec > 0:
+            cmd += ["-ss", f"{float(audio_start_sec):.3f}"]
+        cmd += ["-i", str(audio_src)]
+        if audio_end_sec is not None and audio_end_sec > 0:
+            start = float(audio_start_sec or 0.0)
+            dur = max(0.1, float(audio_end_sec) - start)
+            cmd += ["-t", f"{dur:.3f}"]
+        cmd += [
+            "-map",
+            "0:v:0",
+            "-map",
+            "1:a:0?",
+            *video_encode,
+            "-c:a",
+            "aac",
+            "-b:a",
+            "128k",
+            "-shortest",
+            str(dst),
+        ]
+        if _run(cmd):
+            logger.info("[blur] Encoded with original audio muxed from %s", audio_src)
+            return True
+        logger.warning("[blur] Audio mux failed; retrying video-only encode")
+
+    # Video-only fallback (silent)
+    cmd = [ff, "-y", "-i", str(src), *video_encode, "-an", str(dst)]
+    return _run(cmd)
 
 
 def _cosine_similarity(a: np.ndarray, b: np.ndarray) -> float:
@@ -364,7 +441,12 @@ class BlurEngine:
                 providers=providers,
             )
             use_cuda = self._insightface_on_gpu
-            self._insightface.prepare(ctx_id=0 if use_cuda else -1, det_size=(640, 640))
+            # Larger det_size helps small / profile faces in person crops
+            det_w = int(os.getenv("BLUR_DET_SIZE", "640"))
+            det_w = max(320, min(1024, det_w))
+            self._insightface.prepare(
+                ctx_id=0 if use_cuda else -1, det_size=(det_w, det_w)
+            )
             logger.info(
                 "[blur] InsightFace loaded ctx_id=%s on_gpu=%s providers=%s",
                 0 if use_cuda else -1,
@@ -482,10 +564,33 @@ class BlurEngine:
                 boxes.append((x, y, x + fw, y + fh))
         return boxes
 
+    def _embeddings_from_bgr(self, img: np.ndarray) -> List[np.ndarray]:
+        """All face embeddings in an image (InsightFace or heuristic)."""
+        face_embs: List[np.ndarray] = []
+        if self._insightface is not None:
+            try:
+                faces = self._insightface.get(img)
+                for face in faces or []:
+                    emb = self._embedding_from_face_obj(face)
+                    if emb is not None:
+                        face_embs.append(emb)
+            except Exception as exc:
+                logger.warning("[blur] InsightFace embed failed: %s", exc)
+        if not face_embs and self._face_detect_mode == "heuristic":
+            for box in self._detect_face_boxes(img):
+                emb = self._embedding_for_face_region(img, *box)
+                if emb is not None:
+                    face_embs.append(emb)
+        return face_embs
+
     def build_master_signatures(self, reference_dir: Path) -> np.ndarray:
         """
-        One master embedding per reference image (mean of faces in that image).
-        Returns array shape (N, D), N = number of identities.
+        Gallery of reference embeddings for max-sim matching.
+
+        - Each detected face in each reference image becomes a prototype
+          (multi-angle side/front photos of the same person all help).
+        - Horizontally flipped copies are added so mirrored profiles match.
+        Returns array shape (N, D).
         """
         if self._face_detect_mode != "heuristic" and self._insightface is None:
             raise ValueError(
@@ -499,47 +604,52 @@ class BlurEngine:
         if not paths:
             raise ValueError("No reference images found in reference folder")
 
+        use_flip = os.getenv("BLUR_REF_FLIP_AUG", "1").strip().lower() not in (
+            "0",
+            "false",
+            "no",
+            "off",
+        )
+        ref_images_used = 0
+
         for path in paths:
             img = cv2.imread(str(path))
             if img is None:
                 logger.warning("[blur] Could not read reference image: %s", path)
                 continue
 
-            face_embs: List[np.ndarray] = []
-            if self._insightface is not None:
-                try:
-                    faces = self._insightface.get(img)
-                    for face in faces or []:
-                        emb = self._embedding_from_face_obj(face)
-                        if emb is not None:
-                            face_embs.append(emb)
-                except Exception as exc:
-                    logger.warning("[blur] InsightFace embed on %s failed: %s", path.name, exc)
+            face_embs = self._embeddings_from_bgr(img)
+            flip_embs: List[np.ndarray] = []
+            if use_flip and self._insightface is not None:
+                flip_embs = self._embeddings_from_bgr(cv2.flip(img, 1))
 
-            if not face_embs and self._face_detect_mode == "heuristic":
-                for box in self._detect_face_boxes(img):
-                    emb = self._embedding_for_face_region(img, *box)
-                    if emb is not None:
-                        face_embs.append(emb)
-
-            if not face_embs:
+            if not face_embs and not flip_embs:
                 logger.warning("[blur] No face found in reference: %s", path.name)
                 continue
 
-            master = np.mean(np.stack(face_embs, axis=0), axis=0)
-            master /= np.linalg.norm(master) + 1e-9
-            masters.append(master.astype(np.float32))
+            ref_images_used += 1
+            # Centroid from real (non-flipped) faces + each pose + flip gallery
+            if face_embs:
+                mean_vec = np.mean(np.stack(face_embs, axis=0), axis=0)
+                mean_vec = mean_vec / (np.linalg.norm(mean_vec) + 1e-9)
+                masters.append(mean_vec.astype(np.float32))
+                for emb in face_embs:
+                    masters.append(emb.astype(np.float32))
+            for emb in flip_embs:
+                masters.append(emb.astype(np.float32))
+
             logger.info(
-                "[blur] Identity from %s: %d face(s) dim=%d",
+                "[blur] Ref %s → %d gallery vector(s) (faces=%d flip=%d)",
                 path.name,
+                (1 if face_embs else 0) + len(face_embs) + len(flip_embs),
                 len(face_embs),
-                master.shape[0],
+                len(flip_embs),
             )
 
         if not masters:
             raise ValueError(
                 "No faces detected in reference images. "
-                "Upload clear front-facing photos of the person(s) to blur."
+                "Upload clear photos (front and/or side views) of the person(s) to blur."
             )
 
         dims = {m.shape[0] for m in masters}
@@ -549,17 +659,24 @@ class BlurEngine:
             )
 
         out = np.stack(masters, axis=0)
-        logger.info("[blur] Built %d identity master(s) dim=%d", out.shape[0], out.shape[1])
+        logger.info(
+            "[blur] Built gallery: %d embedding(s) from %d reference image(s) dim=%d",
+            out.shape[0],
+            ref_images_used,
+            out.shape[1],
+        )
         return out
 
     def _person_face_region(
         self, frame: np.ndarray, px1: int, py1: int, px2: int, py2: int
     ) -> Tuple[int, int, int, int]:
+        """Upper-body head prior — wide enough for profiles / turned heads."""
         ph = py2 - py1
         pw = px2 - px1
-        fy2 = py1 + int(ph * 0.45)
-        fx1 = px1 + int(pw * 0.15)
-        fx2 = px2 - int(pw * 0.15)
+        fy2 = py1 + int(ph * 0.50)
+        # Narrow side crop used to kill profile faces; keep almost full person width
+        fx1 = px1 + int(pw * 0.02)
+        fx2 = px2 - int(pw * 0.02)
         sub = frame[py1:fy2, fx1:fx2]
         if sub.size == 0:
             return px1, py1, px2, py2
@@ -567,7 +684,7 @@ class BlurEngine:
             gray = cv2.cvtColor(sub, cv2.COLOR_BGR2GRAY)
             min_sz = max(16, min(24, self._min_face_px))
             for (x, y, fw, fh) in self._haar_cascade.detectMultiScale(
-                gray, 1.1, 4, minSize=(min_sz, min_sz)
+                gray, 1.1, 3, minSize=(min_sz, min_sz)
             ):
                 return fx1 + x, py1 + y, fx1 + x + fw, py1 + y + fh
         return fx1, py1, fx2, fy2
@@ -593,14 +710,16 @@ class BlurEngine:
         px2: int,
         py2: int,
         *,
-        pad_frac: float = 0.18,
+        pad_frac: float = 0.35,
+        pad_x_extra: float = 0.15,
     ) -> List[FaceHit]:
+        """SCRFD on a padded person crop. Extra horizontal pad helps profiles."""
         if self._insightface is None:
             return []
 
         h, w = frame.shape[:2]
         pw, ph = max(1, px2 - px1), max(1, py2 - py1)
-        pad_x = int(pad_frac * pw)
+        pad_x = int((pad_frac + pad_x_extra) * pw)
         pad_y = int(pad_frac * ph)
         cx1, cy1 = max(0, px1 - pad_x), max(0, py1 - pad_y)
         cx2, cy2 = min(w, px2 + pad_x), min(h, py2 + pad_y)
@@ -617,8 +736,15 @@ class BlurEngine:
             logger.warning("[blur] InsightFace crop detect failed: %s", exc)
             return []
 
+        # Soft containment: profile faces often sit near the person-box edge
+        expand = 0.25
+        ex1 = px1 - int(expand * pw)
+        ey1 = py1 - int(expand * ph)
+        ex2 = px2 + int(expand * pw)
+        ey2 = py2 + int(expand * ph)
+
         hits: List[FaceHit] = []
-        min_px = self._min_face_px
+        min_px = max(16, self._min_face_px - 4)
         for face in faces or []:
             bbox = getattr(face, "bbox", None)
             if bbox is None:
@@ -630,14 +756,20 @@ class BlurEngine:
                 continue
             cx = (fx1 + fx2) / 2.0
             cy = (fy1 + fy2) / 2.0
-            if not (px1 <= cx <= px2 and py1 <= cy <= py2):
+            iou = _box_iou((fx1, fy1, fx2, fy2), (px1, py1, px2, py2))
+            inside_soft = ex1 <= cx <= ex2 and ey1 <= cy <= ey2
+            if not inside_soft and iou < 0.05:
                 continue
             score = float(getattr(face, "det_score", 0.0) or 0.0)
+            # Keep low-confidence profile detections (SCRFD scores drop on yaw)
+            if score < 0.25 and iou < 0.08:
+                continue
             hits.append(
                 FaceHit(
                     box=(fx1, fy1, fx2, fy2),
                     embedding=self._embedding_from_face_obj(face),
                     det_score=score,
+                    yaw=_face_yaw_deg(face),
                 )
             )
         return hits
@@ -649,12 +781,19 @@ class BlurEngine:
         py1: int,
         px2: int,
         py2: int,
+        *,
+        prefer_continuity: bool = False,
     ) -> FaceHit:
         use_insight = (
             self._face_detect_mode != "heuristic" and self._insightface is not None
         )
         if use_insight:
+            # Try standard pad, then a wider horizontal pad for side views
             hits = self._faces_in_person_crop(frame, px1, py1, px2, py2)
+            if not hits:
+                hits = self._faces_in_person_crop(
+                    frame, px1, py1, px2, py2, pad_frac=0.45, pad_x_extra=0.35
+                )
             if hits:
                 return max(
                     hits,
@@ -662,7 +801,13 @@ class BlurEngine:
                     * max(1, (hit.box[2] - hit.box[0]) * (hit.box[3] - hit.box[1])),
                 )
         box = self._person_face_region(frame, px1, py1, px2, py2)
-        return FaceHit(box=box, embedding=None, det_score=0.0)
+        # Continuity for locked tracks: still return a head prior so blur does not drop
+        return FaceHit(
+            box=box,
+            embedding=None,
+            det_score=0.15 if prefer_continuity else 0.0,
+            yaw=60.0 if prefer_continuity else 0.0,
+        )
 
     def process_video(
         self,
@@ -755,8 +900,19 @@ class BlurEngine:
                 pct = min(99.0, (processed / frames_to_process) * 100.0)
                 progress_cb(pct, "Processing frames")
 
-        def _blur_box(frame: np.ndarray, box: Tuple[int, int, int, int]) -> None:
+        def _blur_box(
+            frame: np.ndarray,
+            box: Tuple[int, int, int, int],
+            *,
+            yaw: float = 0.0,
+        ) -> None:
             fx1, fy1, fx2, fy2 = box
+            # Profiles need a slightly larger anonymize ROI (jaw / ear / hair)
+            if abs(yaw) >= 30:
+                bw, bh = max(1, fx2 - fx1), max(1, fy2 - fy1)
+                pad = int(0.12 * max(bw, bh))
+                fx1, fy1 = fx1 - pad, fy1 - pad
+                fx2, fy2 = fx2 + pad, fy2 + pad
             _apply_face_anonymize(
                 frame, fx1, fy1, fx2, fy2, operator=self._operator
             )
@@ -819,14 +975,27 @@ class BlurEngine:
                                     by2 / scale,
                                 )
                             px1, py1, px2, py2 = map(int, (bx1, by1, bx2, by2))
+                            is_locked = tid in locked_targets
                             face_hit = self._best_face_for_person(
-                                frame, px1, py1, px2, py2
+                                frame,
+                                px1,
+                                py1,
+                                px2,
+                                py2,
+                                prefer_continuity=is_locked,
                             )
+                            # If SCRFD missed but we were locked, keep last good box
+                            # when the new prior is much larger (torso bleed) or empty.
+                            if is_locked and face_hit.embedding is None:
+                                prev = last_face_boxes.get(tid)
+                                if prev is not None and _box_iou(prev, face_hit.box) < 0.05:
+                                    # Still update toward person head prior for motion
+                                    pass
                             track_face[tid] = face_hit
                             last_face_boxes[tid] = face_hit.box
 
-                            if tid in locked_targets:
-                                _blur_box(frame, face_hit.box)
+                            if is_locked:
+                                _blur_box(frame, face_hit.box, yaw=face_hit.yaw)
                                 continue
 
                             if frame_idx % throttle != 0:
@@ -843,7 +1012,10 @@ class BlurEngine:
 
                             last_embeddings[tid] = emb
                             sim, mid = _max_sim_to_masters(emb, masters)
-                            if sim >= match_threshold:
+                            thr = _effective_match_threshold(
+                                match_threshold, face_hit.yaw
+                            )
+                            if sim >= thr:
                                 frame_matches.append((tid, sim, mid, emb))
                             else:
                                 match_streak[tid] = 0
@@ -871,13 +1043,20 @@ class BlurEngine:
                                     1,
                                 )
                                 near = _box_center_dist(new_box, last_box) <= 1.5 * max_side  # type: ignore[arg-type]
-                                if sim >= match_threshold and (iou >= 0.1 or near):
+                                thr = _effective_match_threshold(
+                                    match_threshold, track_face[tid].yaw
+                                )
+                                if sim >= thr and (iou >= 0.1 or near):
                                     locked_targets.add(tid)
                                     tracks_ever_locked.add(tid)
                                     lock_identity[tid] = mid
                                     active_tracks[tid] = 0
                                     match_streak[tid] = min_streak
-                                    _blur_box(frame, track_face[tid].box)
+                                    _blur_box(
+                                        frame,
+                                        track_face[tid].box,
+                                        yaw=track_face[tid].yaw,
+                                    )
                                     claimed = True
                                     break
                             if not claimed:
@@ -896,7 +1075,11 @@ class BlurEngine:
                                 tracks_ever_locked.add(tid)
                                 lock_identity[tid] = mid
                                 active_tracks[tid] = 0
-                                _blur_box(frame, track_face[tid].box)
+                                _blur_box(
+                                    frame,
+                                    track_face[tid].box,
+                                    yaw=track_face[tid].yaw,
+                                )
                         for tid in list(match_streak.keys()):
                             if tid not in matched_ids and tid not in locked_targets:
                                 match_streak[tid] = 0
@@ -936,14 +1119,19 @@ class BlurEngine:
         if progress_cb:
             progress_cb(99.0, "Encoding output")
 
-        if _transcode_for_browser(raw_path, output_path):
+        # OpenCV writes every frame (blur only in [start,end]) → 1:1 with source audio
+        if _transcode_for_browser(
+            raw_path,
+            output_path,
+            audio_src=video_path,
+        ):
             try:
                 raw_path.unlink(missing_ok=True)
             except Exception:
                 pass
         else:
             logger.warning(
-                "[blur] FFmpeg transcode failed; using raw mp4v (may not play in browser)"
+                "[blur] FFmpeg transcode failed; using raw mp4v (may not play in browser, no audio)"
             )
             if raw_path.exists() and not output_path.exists():
                 raw_path.replace(output_path)

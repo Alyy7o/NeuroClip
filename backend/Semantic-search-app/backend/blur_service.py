@@ -73,14 +73,65 @@ def _face_yaw_deg(face) -> float:
 
 
 def _effective_match_threshold(base: float, yaw_deg: float) -> float:
-    """Relax cosine threshold for profile / high-yaw faces."""
+    """Slightly relax cosine threshold for profile faces (keep floor high to limit FPs)."""
     yaw = abs(float(yaw_deg))
-    delta = float(os.getenv("BLUR_PROFILE_THRESHOLD_DELTA", "0.10"))
-    if yaw >= 50:
-        return max(0.55, base - delta)
-    if yaw >= 30:
-        return max(0.58, base - 0.6 * delta)
+    delta = float(os.getenv("BLUR_PROFILE_THRESHOLD_DELTA", "0.06"))
+    floor = float(os.getenv("BLUR_MATCH_FLOOR", "0.70"))
+    if yaw >= 45:
+        return max(floor, base - delta)
+    if yaw >= 25:
+        return max(floor, base - 0.5 * delta)
     return base
+
+
+def _smooth_box(
+    prev: Optional[Tuple[int, int, int, int]],
+    new: Tuple[int, int, int, int],
+    alpha: float = 0.35,
+) -> Tuple[int, int, int, int]:
+    """EMA box smoothing — kills frame-to-frame blur jitter."""
+    if prev is None:
+        return new
+    a = float(np.clip(alpha, 0.05, 1.0))
+    out = []
+    for p, n in zip(prev, new):
+        out.append(int(round((1.0 - a) * p + a * n)))
+    x1, y1, x2, y2 = out
+    if x2 <= x1 + 2 or y2 <= y1 + 2:
+        return new
+    return (x1, y1, x2, y2)
+
+
+def _face_belongs_to_person(
+    face_box: Tuple[int, int, int, int],
+    person_box: Tuple[int, int, int, int],
+) -> float:
+    """
+    Association score in [0, 1+]. Negative ⇒ reject.
+    Prevents a frontal neighbor face from being stolen into another person's crop.
+    """
+    px1, py1, px2, py2 = person_box
+    fx1, fy1, fx2, fy2 = face_box
+    pw, ph = max(1, px2 - px1), max(1, py2 - py1)
+    cx = (fx1 + fx2) / 2.0
+    cy = (fy1 + fy2) / 2.0
+
+    # Face center must sit in the head band (upper ~62% of person)
+    if cy > py1 + 0.62 * ph or cy < py1 - 0.05 * ph:
+        return -1.0
+    margin_x = 0.06 * pw
+    if cx < px1 - margin_x or cx > px2 + margin_x:
+        return -1.0
+
+    # Inside-person bonus
+    inside = 1.0 if (px1 <= cx <= px2 and py1 <= cy <= py2) else 0.45
+    iou = _box_iou(face_box, person_box)
+    if iou < 0.02 and inside < 1.0:
+        return -1.0
+
+    # Prefer faces higher in the torso (true head)
+    head_y = 1.0 - min(1.0, max(0.0, (cy - py1) / max(ph * 0.62, 1.0)))
+    return inside * (0.55 + 0.45 * head_y) * (0.4 + 0.6 * min(1.0, iou * 3.0))
 
 
 def _on_kaggle() -> bool:
@@ -710,10 +761,10 @@ class BlurEngine:
         px2: int,
         py2: int,
         *,
-        pad_frac: float = 0.35,
-        pad_x_extra: float = 0.15,
+        pad_frac: float = 0.22,
+        pad_x_extra: float = 0.12,
     ) -> List[FaceHit]:
-        """SCRFD on a padded person crop. Extra horizontal pad helps profiles."""
+        """SCRFD on a padded person crop; only faces that belong to this person."""
         if self._insightface is None:
             return []
 
@@ -721,8 +772,10 @@ class BlurEngine:
         pw, ph = max(1, px2 - px1), max(1, py2 - py1)
         pad_x = int((pad_frac + pad_x_extra) * pw)
         pad_y = int(pad_frac * ph)
-        cx1, cy1 = max(0, px1 - pad_x), max(0, py1 - pad_y)
-        cx2, cy2 = min(w, px2 + pad_x), min(h, py2 + pad_y)
+        # Prefer head band crop (reduces stealing torso-neighbor faces)
+        cy1 = max(0, py1 - pad_y)
+        cy2 = min(h, py1 + int(0.70 * ph) + pad_y)
+        cx1, cx2 = max(0, px1 - pad_x), min(w, px2 + pad_x)
         if cx2 <= cx1 or cy2 <= cy1:
             return []
 
@@ -736,13 +789,7 @@ class BlurEngine:
             logger.warning("[blur] InsightFace crop detect failed: %s", exc)
             return []
 
-        # Soft containment: profile faces often sit near the person-box edge
-        expand = 0.25
-        ex1 = px1 - int(expand * pw)
-        ey1 = py1 - int(expand * ph)
-        ex2 = px2 + int(expand * pw)
-        ey2 = py2 + int(expand * ph)
-
+        person = (px1, py1, px2, py2)
         hits: List[FaceHit] = []
         min_px = max(16, self._min_face_px - 4)
         for face in faces or []:
@@ -754,21 +801,17 @@ class BlurEngine:
             fw, fh = fx2 - fx1, fy2 - fy1
             if fw < min_px or fh < min_px:
                 continue
-            cx = (fx1 + fx2) / 2.0
-            cy = (fy1 + fy2) / 2.0
-            iou = _box_iou((fx1, fy1, fx2, fy2), (px1, py1, px2, py2))
-            inside_soft = ex1 <= cx <= ex2 and ey1 <= cy <= ey2
-            if not inside_soft and iou < 0.05:
+            assoc = _face_belongs_to_person((fx1, fy1, fx2, fy2), person)
+            if assoc < 0:
                 continue
             score = float(getattr(face, "det_score", 0.0) or 0.0)
-            # Keep low-confidence profile detections (SCRFD scores drop on yaw)
-            if score < 0.25 and iou < 0.08:
+            if score < 0.30:
                 continue
             hits.append(
                 FaceHit(
                     box=(fx1, fy1, fx2, fy2),
                     embedding=self._embedding_from_face_obj(face),
-                    det_score=score,
+                    det_score=score * assoc,  # bake association into rank score
                     yaw=_face_yaw_deg(face),
                 )
             )
@@ -783,30 +826,38 @@ class BlurEngine:
         py2: int,
         *,
         prefer_continuity: bool = False,
+        prev_box: Optional[Tuple[int, int, int, int]] = None,
     ) -> FaceHit:
         use_insight = (
             self._face_detect_mode != "heuristic" and self._insightface is not None
         )
         if use_insight:
-            # Try standard pad, then a wider horizontal pad for side views
             hits = self._faces_in_person_crop(frame, px1, py1, px2, py2)
             if not hits:
                 hits = self._faces_in_person_crop(
-                    frame, px1, py1, px2, py2, pad_frac=0.45, pad_x_extra=0.35
+                    frame, px1, py1, px2, py2, pad_frac=0.32, pad_x_extra=0.22
                 )
             if hits:
-                return max(
-                    hits,
-                    key=lambda hit: hit.det_score
-                    * max(1, (hit.box[2] - hit.box[0]) * (hit.box[3] - hit.box[1])),
-                )
+                # Prefer faces near previous lock box (temporal consistency)
+                def _rank(hit: FaceHit) -> float:
+                    area = max(1, (hit.box[2] - hit.box[0]) * (hit.box[3] - hit.box[1]))
+                    score = hit.det_score * (area ** 0.5)
+                    if prev_box is not None:
+                        score += 2.0 * _box_iou(hit.box, prev_box)
+                    return score
+
+                return max(hits, key=_rank)
+
+        # Locked continuity: reuse previous face box if available (never jump to torso)
+        if prefer_continuity and prev_box is not None:
+            return FaceHit(box=prev_box, embedding=None, det_score=0.2, yaw=45.0)
+
         box = self._person_face_region(frame, px1, py1, px2, py2)
-        # Continuity for locked tracks: still return a head prior so blur does not drop
         return FaceHit(
             box=box,
             embedding=None,
-            det_score=0.15 if prefer_continuity else 0.0,
-            yaw=60.0 if prefer_continuity else 0.0,
+            det_score=0.0,
+            yaw=0.0,
         )
 
     def process_video(
@@ -854,20 +905,26 @@ class BlurEngine:
         match_streak: Dict[int, int] = {}
         locked_targets: Set[int] = set()
         tracks_ever_locked: Set[int] = set()
-        # tid -> (master_index, last_emb, last_box) for re-attach after ID switch
         lock_identity: Dict[int, int] = {}
         pending_reattach: List[Dict[str, object]] = []
+        # Ghost hold: keep blurring after brief track loss (stops on/off flicker)
+        ghost_boxes: Dict[int, Tuple[Tuple[int, int, int, int], float, int]] = {}
+        # tid -> last yaw for pad consistency
+        last_yaw: Dict[int, float] = {}
 
         frame_idx = 0
         processed = 0
         throttle = max(1, int(throttle))
         grace = max(1, int(grace))
-        min_streak = max(1, int(min_match_streak))
+        # Slightly longer streak reduces accidental locks on bystanders
+        min_streak = max(2, int(min_match_streak))
         master_dim = int(masters.shape[1])
         num_identities = int(masters.shape[0])
         duration_est = total_frames / max(fps, 1.0)
+        box_alpha = float(os.getenv("BLUR_BOX_SMOOTH", "0.30"))
+        ghost_ttl = max(grace, int(os.getenv("BLUR_GHOST_FRAMES", str(max(grace, 45)))))
+        min_det_for_lock = float(os.getenv("BLUR_MIN_DET_SCORE", "0.40"))
 
-        # Soften auto-throttle (cap for long videos)
         if duration_est > 300:
             throttle = max(throttle, min(self._max_throttle, 4))
         elif duration_est > 120:
@@ -907,15 +964,24 @@ class BlurEngine:
             yaw: float = 0.0,
         ) -> None:
             fx1, fy1, fx2, fy2 = box
-            # Profiles need a slightly larger anonymize ROI (jaw / ear / hair)
-            if abs(yaw) >= 30:
+            if abs(yaw) >= 25:
                 bw, bh = max(1, fx2 - fx1), max(1, fy2 - fy1)
-                pad = int(0.12 * max(bw, bh))
+                pad = int(0.10 * max(bw, bh))
                 fx1, fy1 = fx1 - pad, fy1 - pad
                 fx2, fy2 = fx2 + pad, fy2 + pad
             _apply_face_anonymize(
                 frame, fx1, fy1, fx2, fy2, operator=self._operator
             )
+
+        def _apply_all_locks(frame: np.ndarray) -> None:
+            """Blur every locked / ghost box every frame (no temporal holes)."""
+            for tid in locked_targets:
+                box = last_face_boxes.get(tid)
+                if box:
+                    _blur_box(frame, box, yaw=last_yaw.get(tid, 0.0))
+            for tid, (box, yaw, _ttl) in list(ghost_boxes.items()):
+                if tid not in locked_targets:
+                    _blur_box(frame, box, yaw=yaw)
 
         while True:
             ok, frame = cap.read()
@@ -924,15 +990,11 @@ class BlurEngine:
 
             in_range = start_frame <= frame_idx < end_frame
             if in_range:
-                detect_interval = 2 if locked_targets else throttle
+                # Update boxes every frame once locked (smooth tracking); else throttle re-ID
+                detect_interval = 1 if locked_targets else throttle
                 run_detect = frame_idx % detect_interval == 0
 
-                if locked_targets and not run_detect:
-                    for tid in locked_targets:
-                        box = last_face_boxes.get(tid)
-                        if box:
-                            _blur_box(frame, box)
-                elif run_detect:
+                if run_detect:
                     infer_frame = frame
                     scale = 1.0
                     fh, fw = frame.shape[:2]
@@ -954,9 +1016,7 @@ class BlurEngine:
                         imgsz=640,
                     )
                     current_ids: Set[int] = set()
-                    # All candidates that match this frame (multi-lock)
                     frame_matches: List[Tuple[int, float, int, Optional[np.ndarray]]] = []
-
                     track_face: Dict[int, FaceHit] = {}
 
                     for r in results:
@@ -976,6 +1036,7 @@ class BlurEngine:
                                 )
                             px1, py1, px2, py2 = map(int, (bx1, by1, bx2, by2))
                             is_locked = tid in locked_targets
+                            prev_box = last_face_boxes.get(tid)
                             face_hit = self._best_face_for_person(
                                 frame,
                                 px1,
@@ -983,30 +1044,35 @@ class BlurEngine:
                                 px2,
                                 py2,
                                 prefer_continuity=is_locked,
+                                prev_box=prev_box,
                             )
-                            # If SCRFD missed but we were locked, keep last good box
-                            # when the new prior is much larger (torso bleed) or empty.
-                            if is_locked and face_hit.embedding is None:
-                                prev = last_face_boxes.get(tid)
-                                if prev is not None and _box_iou(prev, face_hit.box) < 0.05:
-                                    # Still update toward person head prior for motion
-                                    pass
+                            # EMA smooth — prevents glitchy jump between frames
+                            smooth = _smooth_box(prev_box, face_hit.box, alpha=box_alpha)
+                            face_hit = FaceHit(
+                                box=smooth,
+                                embedding=face_hit.embedding,
+                                det_score=face_hit.det_score,
+                                yaw=face_hit.yaw,
+                            )
                             track_face[tid] = face_hit
-                            last_face_boxes[tid] = face_hit.box
+                            last_face_boxes[tid] = smooth
+                            last_yaw[tid] = face_hit.yaw
 
                             if is_locked:
-                                _blur_box(frame, face_hit.box, yaw=face_hit.yaw)
                                 continue
 
+                            # Re-ID only on throttle ticks
                             if frame_idx % throttle != 0:
                                 continue
 
+                            # ONLY lock from real SCRFD+ArcFace face embeddings
+                            # (torso/heuristic crops caused false positives on bystanders)
                             emb = face_hit.embedding
-                            if emb is None or emb.shape[0] != master_dim:
-                                emb = self._embedding_for_face_region(
-                                    frame, *face_hit.box
-                                )
-                            if emb is None or emb.shape[0] != master_dim:
+                            if (
+                                emb is None
+                                or emb.shape[0] != master_dim
+                                or face_hit.det_score < min_det_for_lock
+                            ):
                                 match_streak[tid] = 0
                                 continue
 
@@ -1020,11 +1086,11 @@ class BlurEngine:
                             else:
                                 match_streak[tid] = 0
 
-                    # Re-attach: new tracks that match a recently lost locked identity
+                    # Re-attach after ID switch
                     if frame_idx % throttle == 0 and pending_reattach:
                         still_pending: List[Dict[str, object]] = []
                         for pend in pending_reattach:
-                            pend["miss"] = int(pend["miss"]) + detect_interval
+                            pend["miss"] = int(pend["miss"]) + max(1, throttle)
                             if int(pend["miss"]) > grace:
                                 continue
                             claimed = False
@@ -1036,34 +1102,28 @@ class BlurEngine:
                                 last_box = pend["box"]  # type: ignore[assignment]
                                 new_box = track_face[tid].box
                                 iou = _box_iou(new_box, last_box)  # type: ignore[arg-type]
-                                # Spatial gate: IoU or nearby centers (occlusion / ID switch)
                                 max_side = max(
                                     last_box[2] - last_box[0],  # type: ignore[index]
                                     last_box[3] - last_box[1],  # type: ignore[index]
                                     1,
                                 )
-                                near = _box_center_dist(new_box, last_box) <= 1.5 * max_side  # type: ignore[arg-type]
+                                near = _box_center_dist(new_box, last_box) <= 1.2 * max_side  # type: ignore[arg-type]
                                 thr = _effective_match_threshold(
                                     match_threshold, track_face[tid].yaw
                                 )
-                                if sim >= thr and (iou >= 0.1 or near):
+                                if sim >= thr and (iou >= 0.12 or near):
                                     locked_targets.add(tid)
                                     tracks_ever_locked.add(tid)
                                     lock_identity[tid] = mid
                                     active_tracks[tid] = 0
                                     match_streak[tid] = min_streak
-                                    _blur_box(
-                                        frame,
-                                        track_face[tid].box,
-                                        yaw=track_face[tid].yaw,
-                                    )
+                                    ghost_boxes.pop(tid, None)
                                     claimed = True
                                     break
                             if not claimed:
                                 still_pending.append(pend)
                         pending_reattach = still_pending
 
-                    # Multi-lock: every matching track increments its own streak
                     if frame_idx % throttle == 0:
                         matched_ids = {t for t, _, _, _ in frame_matches}
                         for tid, sim, mid, emb in frame_matches:
@@ -1075,10 +1135,12 @@ class BlurEngine:
                                 tracks_ever_locked.add(tid)
                                 lock_identity[tid] = mid
                                 active_tracks[tid] = 0
-                                _blur_box(
-                                    frame,
-                                    track_face[tid].box,
-                                    yaw=track_face[tid].yaw,
+                                ghost_boxes.pop(tid, None)
+                                logger.info(
+                                    "[blur] Locked track %s sim=%.3f master=%s",
+                                    tid,
+                                    sim,
+                                    mid,
                                 )
                         for tid in list(match_streak.keys()):
                             if tid not in matched_ids and tid not in locked_targets:
@@ -1087,9 +1149,15 @@ class BlurEngine:
                     for tid in list(locked_targets):
                         if tid not in current_ids:
                             active_tracks[tid] = active_tracks.get(tid, 0) + detect_interval
+                            box = last_face_boxes.get(tid)
+                            if box is not None:
+                                ghost_boxes[tid] = (
+                                    box,
+                                    last_yaw.get(tid, 0.0),
+                                    ghost_ttl,
+                                )
                             if active_tracks[tid] > grace:
                                 mid = lock_identity.get(tid, 0)
-                                box = last_face_boxes.get(tid)
                                 emb = last_embeddings.get(tid)
                                 if box is not None:
                                     pending_reattach.append(
@@ -1104,7 +1172,22 @@ class BlurEngine:
                                 active_tracks.pop(tid, None)
                                 match_streak.pop(tid, None)
                                 lock_identity.pop(tid, None)
-                                last_face_boxes.pop(tid, None)
+                                # keep last_face_boxes for ghost briefly
+                        else:
+                            active_tracks[tid] = 0
+                            ghost_boxes.pop(tid, None)
+
+                # Decay ghosts
+                for tid in list(ghost_boxes.keys()):
+                    box, yaw, ttl = ghost_boxes[tid]
+                    ttl -= 1
+                    if ttl <= 0 or tid in locked_targets:
+                        ghost_boxes.pop(tid, None)
+                    else:
+                        ghost_boxes[tid] = (box, yaw, ttl)
+
+                # Always paint locks this frame (eliminates inter-detect flicker)
+                _apply_all_locks(frame)
 
             writer.write(frame)
             frame_idx += 1

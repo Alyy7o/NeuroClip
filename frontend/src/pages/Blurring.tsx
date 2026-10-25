@@ -140,10 +140,10 @@ export default function Blurring() {
       if (query.trim()) formData.append('query', queryWithTime);
       if (timeRange.start > 0) formData.append('start_sec', String(timeRange.start));
       if (timeRange.end > 0) formData.append('end_sec', String(timeRange.end));
-      formData.append('match_threshold', '0.78');
+      formData.append('match_threshold', '0.75');
       formData.append('throttle', '2');
       formData.append('grace', '45');
-      formData.append('min_match_streak', '3');
+      formData.append('min_match_streak', '2');
 
       const xhr = new XMLHttpRequest();
       const uploadPromise = new Promise<Record<string, unknown>>((resolve, reject) => {

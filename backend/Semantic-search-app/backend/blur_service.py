@@ -47,8 +47,9 @@ class FaceHit(NamedTuple):
 
     box: Tuple[int, int, int, int]
     embedding: Optional[np.ndarray]
-    det_score: float
+    det_score: float  # raw SCRFD score (do not bake association into this)
     yaw: float = 0.0  # InsightFace pose yaw (deg); |yaw| high ⇒ profile/side view
+    assoc: float = 1.0  # person-association score for ranking only
 
 
 def _face_yaw_deg(face) -> float:
@@ -75,8 +76,8 @@ def _face_yaw_deg(face) -> float:
 def _effective_match_threshold(base: float, yaw_deg: float) -> float:
     """Slightly relax cosine threshold for profile faces (keep floor high to limit FPs)."""
     yaw = abs(float(yaw_deg))
-    delta = float(os.getenv("BLUR_PROFILE_THRESHOLD_DELTA", "0.06"))
-    floor = float(os.getenv("BLUR_MATCH_FLOOR", "0.70"))
+    delta = float(os.getenv("BLUR_PROFILE_THRESHOLD_DELTA", "0.08"))
+    floor = float(os.getenv("BLUR_MATCH_FLOOR", "0.65"))
     if yaw >= 45:
         return max(floor, base - delta)
     if yaw >= 25:
@@ -107,8 +108,8 @@ def _face_belongs_to_person(
     person_box: Tuple[int, int, int, int],
 ) -> float:
     """
-    Association score in [0, 1+]. Negative ⇒ reject.
-    Prevents a frontal neighbor face from being stolen into another person's crop.
+    Association score > 0 if face likely belongs to this person; < 0 reject.
+    Used for ranking only — do NOT multiply into det_score for lock gates.
     """
     px1, py1, px2, py2 = person_box
     fx1, fy1, fx2, fy2 = face_box
@@ -116,22 +117,20 @@ def _face_belongs_to_person(
     cx = (fx1 + fx2) / 2.0
     cy = (fy1 + fy2) / 2.0
 
-    # Face center must sit in the head band (upper ~62% of person)
-    if cy > py1 + 0.62 * ph or cy < py1 - 0.05 * ph:
+    # Head band: upper ~72% (profiles / short boxes need slack)
+    if cy > py1 + 0.72 * ph or cy < py1 - 0.08 * ph:
         return -1.0
-    margin_x = 0.06 * pw
+    margin_x = 0.12 * pw
     if cx < px1 - margin_x or cx > px2 + margin_x:
         return -1.0
 
-    # Inside-person bonus
-    inside = 1.0 if (px1 <= cx <= px2 and py1 <= cy <= py2) else 0.45
+    inside = 1.0 if (px1 <= cx <= px2 and py1 <= cy <= py2) else 0.55
     iou = _box_iou(face_box, person_box)
-    if iou < 0.02 and inside < 1.0:
+    if iou < 0.01 and inside < 1.0:
         return -1.0
 
-    # Prefer faces higher in the torso (true head)
-    head_y = 1.0 - min(1.0, max(0.0, (cy - py1) / max(ph * 0.62, 1.0)))
-    return inside * (0.55 + 0.45 * head_y) * (0.4 + 0.6 * min(1.0, iou * 3.0))
+    head_y = 1.0 - min(1.0, max(0.0, (cy - py1) / max(ph * 0.72, 1.0)))
+    return inside * (0.5 + 0.5 * head_y) * (0.35 + 0.65 * min(1.0, iou * 2.5 + 0.15))
 
 
 def _on_kaggle() -> bool:
@@ -805,14 +804,15 @@ class BlurEngine:
             if assoc < 0:
                 continue
             score = float(getattr(face, "det_score", 0.0) or 0.0)
-            if score < 0.30:
+            if score < 0.22:
                 continue
             hits.append(
                 FaceHit(
                     box=(fx1, fy1, fx2, fy2),
                     embedding=self._embedding_from_face_obj(face),
-                    det_score=score * assoc,  # bake association into rank score
+                    det_score=score,
                     yaw=_face_yaw_deg(face),
+                    assoc=assoc,
                 )
             )
         return hits
@@ -838,19 +838,21 @@ class BlurEngine:
                     frame, px1, py1, px2, py2, pad_frac=0.32, pad_x_extra=0.22
                 )
             if hits:
-                # Prefer faces near previous lock box (temporal consistency)
+                # Prefer THIS person's face over a higher-scoring neighbor
                 def _rank(hit: FaceHit) -> float:
                     area = max(1, (hit.box[2] - hit.box[0]) * (hit.box[3] - hit.box[1]))
-                    score = hit.det_score * (area ** 0.5)
+                    score = hit.assoc * hit.det_score * (area ** 0.5)
                     if prev_box is not None:
-                        score += 2.0 * _box_iou(hit.box, prev_box)
+                        score += 3.0 * _box_iou(hit.box, prev_box)
                     return score
 
                 return max(hits, key=_rank)
 
         # Locked continuity: reuse previous face box if available (never jump to torso)
         if prefer_continuity and prev_box is not None:
-            return FaceHit(box=prev_box, embedding=None, det_score=0.2, yaw=45.0)
+            return FaceHit(
+                box=prev_box, embedding=None, det_score=0.2, yaw=45.0, assoc=1.0
+            )
 
         box = self._person_face_region(frame, px1, py1, px2, py2)
         return FaceHit(
@@ -858,6 +860,7 @@ class BlurEngine:
             embedding=None,
             det_score=0.0,
             yaw=0.0,
+            assoc=0.0,
         )
 
     def process_video(
@@ -923,7 +926,12 @@ class BlurEngine:
         duration_est = total_frames / max(fps, 1.0)
         box_alpha = float(os.getenv("BLUR_BOX_SMOOTH", "0.30"))
         ghost_ttl = max(grace, int(os.getenv("BLUR_GHOST_FRAMES", str(max(grace, 45)))))
-        min_det_for_lock = float(os.getenv("BLUR_MIN_DET_SCORE", "0.40"))
+        # Raw SCRFD score gate (assoc must NOT be baked into det_score)
+        min_det_for_lock = float(os.getenv("BLUR_MIN_DET_SCORE", "0.28"))
+        faces_seen = 0
+        embed_attempts = 0
+        best_sim_seen = -1.0
+        lock_events = 0
 
         if duration_est > 300:
             throttle = max(throttle, min(self._max_throttle, 4))
@@ -1053,10 +1061,13 @@ class BlurEngine:
                                 embedding=face_hit.embedding,
                                 det_score=face_hit.det_score,
                                 yaw=face_hit.yaw,
+                                assoc=face_hit.assoc,
                             )
                             track_face[tid] = face_hit
                             last_face_boxes[tid] = smooth
                             last_yaw[tid] = face_hit.yaw
+                            if face_hit.embedding is not None:
+                                faces_seen += 1
 
                             if is_locked:
                                 continue
@@ -1065,19 +1076,20 @@ class BlurEngine:
                             if frame_idx % throttle != 0:
                                 continue
 
-                            # ONLY lock from real SCRFD+ArcFace face embeddings
-                            # (torso/heuristic crops caused false positives on bystanders)
+                            # Lock only from SCRFD+ArcFace face embeddings (not torso crops)
                             emb = face_hit.embedding
-                            if (
-                                emb is None
-                                or emb.shape[0] != master_dim
-                                or face_hit.det_score < min_det_for_lock
-                            ):
+                            if emb is None or emb.shape[0] != master_dim:
+                                match_streak[tid] = 0
+                                continue
+                            if face_hit.det_score < min_det_for_lock:
                                 match_streak[tid] = 0
                                 continue
 
+                            embed_attempts += 1
                             last_embeddings[tid] = emb
                             sim, mid = _max_sim_to_masters(emb, masters)
+                            if sim > best_sim_seen:
+                                best_sim_seen = sim
                             thr = _effective_match_threshold(
                                 match_threshold, face_hit.yaw
                             )
@@ -1085,6 +1097,17 @@ class BlurEngine:
                                 frame_matches.append((tid, sim, mid, emb))
                             else:
                                 match_streak[tid] = 0
+                                if embed_attempts <= 8 or embed_attempts % 50 == 0:
+                                    logger.info(
+                                        "[blur] no-lock tid=%s sim=%.3f thr=%.3f "
+                                        "det=%.2f yaw=%.0f assoc=%.2f",
+                                        tid,
+                                        sim,
+                                        thr,
+                                        face_hit.det_score,
+                                        face_hit.yaw,
+                                        face_hit.assoc,
+                                    )
 
                     # Re-attach after ID switch
                     if frame_idx % throttle == 0 and pending_reattach:
@@ -1136,6 +1159,7 @@ class BlurEngine:
                                 lock_identity[tid] = mid
                                 active_tracks[tid] = 0
                                 ghost_boxes.pop(tid, None)
+                                lock_events += 1
                                 logger.info(
                                     "[blur] Locked track %s sim=%.3f master=%s",
                                     tid,
@@ -1220,10 +1244,27 @@ class BlurEngine:
                 raw_path.replace(output_path)
 
         duration_sec = processed / fps if fps > 0 else 0.0
+        ever = len(tracks_ever_locked)
+        logger.info(
+            "[blur] done faces_seen=%d embed_attempts=%d best_sim=%.3f "
+            "lock_events=%d ever_locked=%d end_locked=%d",
+            faces_seen,
+            embed_attempts,
+            best_sim_seen,
+            lock_events,
+            ever,
+            len(locked_targets),
+        )
         return {
-            "target_ids_blurred": len(locked_targets),
-            "tracks_ever_locked": len(tracks_ever_locked),
+            # Use cumulative locks — end-state set is often empty after grace expiry
+            "target_ids_blurred": ever,
+            "tracks_ever_locked": ever,
+            "locked_at_end": len(locked_targets),
             "num_identities": num_identities,
+            "faces_seen": faces_seen,
+            "embed_attempts": embed_attempts,
+            "best_sim_seen": round(float(best_sim_seen), 4) if best_sim_seen >= 0 else None,
+            "lock_events": lock_events,
             "total_frames": processed,
             "fps": fps,
             "width": width,

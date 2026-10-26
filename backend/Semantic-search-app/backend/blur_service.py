@@ -6,15 +6,16 @@ Research claim (frozen — see docs/Blurring_Module_Paper_Roadmap.md §0):
   Not NLP-driven, not plates/IDs, not blur-everyone.
 
 Pipeline:
-  1. One master embedding per reference image (InsightFace buffalo_l).
+  1. Gallery embeddings per reference image (identity-tagged) + flip aug.
   2. YOLOv8n person track (BoT-SORT) + SCRFD face boxes on person crops.
-  3. Max-sim match to any master; multi-lock + re-attach after ID switch.
-  4. Adaptive elliptical Gaussian (or mosaic) blur; FFmpeg H.264 for browser.
+  3. Max-sim match; ONE active lock slot per identity (transfer on ID switch).
+  4. Blur only SCRFD-confirmed faces (short hold); elliptical Gaussian/mosaic.
 
 Env:
   BLUR_DEVICE, BLUR_REQUIRE_GPU, BLUR_YOLO_WEIGHTS, BLUR_TRACKER
   BLUR_MATCH_THRESHOLD (default 0.78), BLUR_FACE_DETECT, BLUR_MIN_FACE_PX
   BLUR_MAX_THROTTLE (default 4), BLUR_OPERATOR=gaussian|mosaic
+  BLUR_FACE_HOLD_FRAMES (default 15), BLUR_UNLOCK_DELTA (default 0.08)
 """
 
 from __future__ import annotations
@@ -253,8 +254,16 @@ def _cosine_similarity(a: np.ndarray, b: np.ndarray) -> float:
     return float(np.dot(a, b) / (na * nb))
 
 
-def _max_sim_to_masters(emb: np.ndarray, masters: np.ndarray) -> Tuple[float, int]:
-    """Return (best_sim, master_index). masters shape (N, D)."""
+def _max_sim_to_masters(
+    emb: np.ndarray,
+    masters: np.ndarray,
+    master_identity: Optional[np.ndarray] = None,
+) -> Tuple[float, int]:
+    """
+    Return (best_sim, identity_id).
+    If master_identity is provided, identity_id is the ref-image index;
+    otherwise identity_id is the gallery row index.
+    """
     best_sim = -1.0
     best_i = 0
     for i in range(masters.shape[0]):
@@ -262,7 +271,29 @@ def _max_sim_to_masters(emb: np.ndarray, masters: np.ndarray) -> Tuple[float, in
         if sim > best_sim:
             best_sim = sim
             best_i = i
-    return best_sim, best_i
+    if master_identity is not None and master_identity.size == masters.shape[0]:
+        return best_sim, int(master_identity[best_i])
+    return best_sim, int(best_i)
+
+
+def _is_plausible_face_box(
+    box: Tuple[int, int, int, int],
+    frame_w: int,
+    frame_h: int,
+) -> bool:
+    """Reject absurd ROIs (full-frame / non-face aspect) that cause car blurs."""
+    x1, y1, x2, y2 = box
+    bw, bh = x2 - x1, y2 - y1
+    if bw < 12 or bh < 12:
+        return False
+    area = bw * bh
+    frame_area = max(1, frame_w * frame_h)
+    if area > 0.25 * frame_area:
+        return False
+    aspect = bw / float(bh)
+    if aspect < 0.35 or aspect > 2.8:
+        return False
+    return True
 
 
 def _box_iou(a: Tuple[int, int, int, int], b: Tuple[int, int, int, int]) -> float:
@@ -633,14 +664,16 @@ class BlurEngine:
                     face_embs.append(emb)
         return face_embs
 
-    def build_master_signatures(self, reference_dir: Path) -> np.ndarray:
+    def build_master_signatures(
+        self, reference_dir: Path
+    ) -> Tuple[np.ndarray, np.ndarray]:
         """
         Gallery of reference embeddings for max-sim matching.
 
-        - Each detected face in each reference image becomes a prototype
-          (multi-angle side/front photos of the same person all help).
-        - Horizontally flipped copies are added so mirrored profiles match.
-        Returns array shape (N, D).
+        Returns:
+          masters: (N, D) float32
+          master_identity: (N,) int32 — reference-image index for each vector
+            (one identity slot per successfully embedded reference file)
         """
         if self._face_detect_mode != "heuristic" and self._insightface is None:
             raise ValueError(
@@ -649,6 +682,7 @@ class BlurEngine:
             )
 
         masters: List[np.ndarray] = []
+        identity_ids: List[int] = []
         exts = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
         paths = sorted(p for p in reference_dir.iterdir() if p.suffix.lower() in exts)
         if not paths:
@@ -660,7 +694,7 @@ class BlurEngine:
             "no",
             "off",
         )
-        ref_images_used = 0
+        identity_idx = 0
 
         for path in paths:
             img = cv2.imread(str(path))
@@ -677,24 +711,28 @@ class BlurEngine:
                 logger.warning("[blur] No face found in reference: %s", path.name)
                 continue
 
-            ref_images_used += 1
-            # Centroid from real (non-flipped) faces + each pose + flip gallery
+            def _add(vec: np.ndarray) -> None:
+                masters.append(vec.astype(np.float32))
+                identity_ids.append(identity_idx)
+
             if face_embs:
                 mean_vec = np.mean(np.stack(face_embs, axis=0), axis=0)
                 mean_vec = mean_vec / (np.linalg.norm(mean_vec) + 1e-9)
-                masters.append(mean_vec.astype(np.float32))
+                _add(mean_vec)
                 for emb in face_embs:
-                    masters.append(emb.astype(np.float32))
+                    _add(emb)
             for emb in flip_embs:
-                masters.append(emb.astype(np.float32))
+                _add(emb)
 
             logger.info(
-                "[blur] Ref %s → %d gallery vector(s) (faces=%d flip=%d)",
+                "[blur] Identity %d from %s → %d gallery vector(s) (faces=%d flip=%d)",
+                identity_idx,
                 path.name,
                 (1 if face_embs else 0) + len(face_embs) + len(flip_embs),
                 len(face_embs),
                 len(flip_embs),
             )
+            identity_idx += 1
 
         if not masters:
             raise ValueError(
@@ -709,13 +747,14 @@ class BlurEngine:
             )
 
         out = np.stack(masters, axis=0)
+        ids = np.asarray(identity_ids, dtype=np.int32)
         logger.info(
-            "[blur] Built gallery: %d embedding(s) from %d reference image(s) dim=%d",
+            "[blur] Built gallery: %d embedding(s) from %d identities dim=%d",
             out.shape[0],
-            ref_images_used,
+            identity_idx,
             out.shape[1],
         )
-        return out
+        return out, ids
 
     def _person_face_region(
         self, frame: np.ndarray, px1: int, py1: int, px2: int, py2: int
@@ -868,6 +907,7 @@ class BlurEngine:
         video_path: Path,
         output_path: Path,
         masters: np.ndarray,
+        master_identity: np.ndarray,
         *,
         match_threshold: float = DEFAULT_MATCH_THRESHOLD,
         throttle: int = 3,
@@ -881,6 +921,9 @@ class BlurEngine:
             masters = masters.reshape(1, -1)
         if masters.ndim != 2 or masters.shape[0] < 1:
             raise ValueError("masters must be shape (N, D) with N>=1")
+        master_identity = np.asarray(master_identity, dtype=np.int32).ravel()
+        if master_identity.shape[0] != masters.shape[0]:
+            raise ValueError("master_identity length must match masters rows")
 
         cap = cv2.VideoCapture(str(video_path))
         if not cap.isOpened():
@@ -904,29 +947,31 @@ class BlurEngine:
             cap.release()
             raise RuntimeError(f"Cannot create output video: {raw_path}")
 
-        active_tracks: Dict[int, int] = {}
+        # One YOLO tid per identity slot
+        active_lock: Dict[int, int] = {}  # identity_id -> tid
+        tid_to_identity: Dict[int, int] = {}
         match_streak: Dict[int, int] = {}
-        locked_targets: Set[int] = set()
+        unlock_miss: Dict[int, int] = {}
+        miss_frames: Dict[int, int] = {}  # tid absent from YOLO
+        identities_ever_locked: Set[int] = set()
         tracks_ever_locked: Set[int] = set()
-        lock_identity: Dict[int, int] = {}
         pending_reattach: List[Dict[str, object]] = []
-        # Ghost hold: keep blurring after brief track loss (stops on/off flicker)
-        ghost_boxes: Dict[int, Tuple[Tuple[int, int, int, int], float, int]] = {}
-        # tid -> last yaw for pad consistency
-        last_yaw: Dict[int, float] = {}
+        # tid -> (box, yaw, age_frames since SCRFD confirm)
+        confirmed_face: Dict[int, Tuple[Tuple[int, int, int, int], float, int]] = {}
+        last_embeddings: Dict[int, np.ndarray] = {}
 
         frame_idx = 0
         processed = 0
         throttle = max(1, int(throttle))
         grace = max(1, int(grace))
-        # Slightly longer streak reduces accidental locks on bystanders
         min_streak = max(2, int(min_match_streak))
         master_dim = int(masters.shape[1])
-        num_identities = int(masters.shape[0])
+        num_identities = int(master_identity.max()) + 1 if master_identity.size else 0
         duration_est = total_frames / max(fps, 1.0)
         box_alpha = float(os.getenv("BLUR_BOX_SMOOTH", "0.30"))
-        ghost_ttl = max(grace, int(os.getenv("BLUR_GHOST_FRAMES", str(max(grace, 45)))))
-        # Raw SCRFD score gate (assoc must NOT be baked into det_score)
+        face_hold = max(4, int(os.getenv("BLUR_FACE_HOLD_FRAMES", "15")))
+        unlock_delta = float(os.getenv("BLUR_UNLOCK_DELTA", "0.08"))
+        unlock_streak_need = max(2, int(os.getenv("BLUR_UNLOCK_STREAK", "3")))
         min_det_for_lock = float(os.getenv("BLUR_MIN_DET_SCORE", "0.28"))
         faces_seen = 0
         embed_attempts = 0
@@ -942,21 +987,18 @@ class BlurEngine:
         throttle = min(throttle, self._max_throttle)
 
         infer_max = int(os.getenv("BLUR_INFER_MAX_DIM", "960"))
-        last_face_boxes: Dict[int, Tuple[int, int, int, int]] = {}
-        last_embeddings: Dict[int, np.ndarray] = {}
         frames_to_process = max(1, end_frame - start_frame)
 
         logger.info(
-            "[blur] identities=%d match_threshold=%.2f min_streak=%d throttle=%d "
-            "device=%s face_detect=%s operator=%s on_gpu_if=%s ~%.0fs video",
+            "[blur] identities=%d gallery=%d match_threshold=%.2f min_streak=%d "
+            "throttle=%d hold=%d device=%s ~%.0fs video",
             num_identities,
+            masters.shape[0],
             match_threshold,
             min_streak,
             throttle,
+            face_hold,
             self._device,
-            self._face_detect_mode if self._insightface is not None else "heuristic",
-            self._operator,
-            self._insightface_on_gpu,
             duration_est,
         )
 
@@ -971,6 +1013,8 @@ class BlurEngine:
             *,
             yaw: float = 0.0,
         ) -> None:
+            if not _is_plausible_face_box(box, width, height):
+                return
             fx1, fy1, fx2, fy2 = box
             if abs(yaw) >= 25:
                 bw, bh = max(1, fx2 - fx1), max(1, fy2 - fy1)
@@ -981,15 +1025,84 @@ class BlurEngine:
                 frame, fx1, fy1, fx2, fy2, operator=self._operator
             )
 
-        def _apply_all_locks(frame: np.ndarray) -> None:
-            """Blur every locked / ghost box every frame (no temporal holes)."""
-            for tid in locked_targets:
-                box = last_face_boxes.get(tid)
-                if box:
-                    _blur_box(frame, box, yaw=last_yaw.get(tid, 0.0))
-            for tid, (box, yaw, _ttl) in list(ghost_boxes.items()):
-                if tid not in locked_targets:
-                    _blur_box(frame, box, yaw=yaw)
+        def _release_identity(iid: int, reason: str) -> None:
+            tid = active_lock.pop(iid, None)
+            if tid is None:
+                return
+            tid_to_identity.pop(tid, None)
+            unlock_miss.pop(tid, None)
+            miss_frames.pop(tid, None)
+            match_streak.pop(tid, None)
+            # Drop stale face so orphaned ovals cannot keep painting
+            confirmed_face.pop(tid, None)
+            logger.info("[blur] Released identity %s tid=%s (%s)", iid, tid, reason)
+
+        def _bind_lock(iid: int, tid: int, *, transfer: bool = False) -> None:
+            # If this track was bound to a different identity, free that slot first
+            other_iid = tid_to_identity.get(tid)
+            if other_iid is not None and other_iid != iid:
+                active_lock.pop(other_iid, None)
+                unlock_miss.pop(tid, None)
+                logger.info(
+                    "[blur] Tid %s stolen from identity %s → %s", tid, other_iid, iid
+                )
+
+            old = active_lock.get(iid)
+            if old is not None and old != tid:
+                tid_to_identity.pop(old, None)
+                confirmed_face.pop(old, None)
+                unlock_miss.pop(old, None)
+                miss_frames.pop(old, None)
+            active_lock[iid] = tid
+            tid_to_identity[tid] = iid
+            identities_ever_locked.add(iid)
+            tracks_ever_locked.add(tid)
+            match_streak[tid] = min_streak
+            unlock_miss[tid] = 0
+            miss_frames[tid] = 0
+            # Drop any pending re-attach for this identity (slot is filled)
+            nonlocal pending_reattach
+            pending_reattach = [
+                p for p in pending_reattach if int(p["identity_id"]) != iid
+            ]
+            nonlocal lock_events
+            lock_events += 1
+            logger.info(
+                "[blur] %s identity %s → tid %s",
+                "Transfer" if transfer else "Lock",
+                iid,
+                tid,
+            )
+
+        def _spatial_ok(
+            new_box: Tuple[int, int, int, int],
+            old_box: Tuple[int, int, int, int],
+        ) -> bool:
+            iou = _box_iou(new_box, old_box)
+            max_side = max(old_box[2] - old_box[0], old_box[3] - old_box[1], 1)
+            near = _box_center_dist(new_box, old_box) <= 0.6 * max_side
+            return iou >= 0.2 or near
+
+        def _apply_identity_blurs(frame: np.ndarray) -> None:
+            """Paint only confirmed SCRFD faces (short hold) — never torso priors."""
+            for iid, tid in list(active_lock.items()):
+                conf = confirmed_face.get(tid)
+                if conf is None:
+                    continue
+                box, yaw, age = conf
+                # age == face_hold still paints (locked tracks cap age at face_hold)
+                if age > face_hold:
+                    continue
+                _blur_box(frame, box, yaw=yaw)
+            # Pending re-attach short hold (same confirmed box, no YOLO tid)
+            for pend in pending_reattach:
+                box = pend.get("box")
+                age = int(pend.get("hold_age", 0))
+                if box is None or age > face_hold:
+                    continue
+                if int(pend["identity_id"]) in active_lock:
+                    continue
+                _blur_box(frame, box, yaw=float(pend.get("yaw", 0.0)))  # type: ignore[arg-type]
 
         while True:
             ok, frame = cap.read()
@@ -998,8 +1111,7 @@ class BlurEngine:
 
             in_range = start_frame <= frame_idx < end_frame
             if in_range:
-                # Update boxes every frame once locked (smooth tracking); else throttle re-ID
-                detect_interval = 1 if locked_targets else throttle
+                detect_interval = 1 if active_lock else throttle
                 run_detect = frame_idx % detect_interval == 0
 
                 if run_detect:
@@ -1024,7 +1136,10 @@ class BlurEngine:
                         imgsz=640,
                     )
                     current_ids: Set[int] = set()
-                    frame_matches: List[Tuple[int, float, int, Optional[np.ndarray]]] = []
+                    # (tid, sim, identity_id, emb, box, yaw, det)
+                    frame_matches: List[
+                        Tuple[int, float, int, np.ndarray, Tuple[int, int, int, int], float, float]
+                    ] = []
                     track_face: Dict[int, FaceHit] = {}
 
                     for r in results:
@@ -1043,175 +1158,222 @@ class BlurEngine:
                                     by2 / scale,
                                 )
                             px1, py1, px2, py2 = map(int, (bx1, by1, bx2, by2))
-                            is_locked = tid in locked_targets
-                            prev_box = last_face_boxes.get(tid)
+                            is_locked = tid in tid_to_identity
+                            prev_conf = confirmed_face.get(tid)
+                            prev_box = prev_conf[0] if prev_conf else None
                             face_hit = self._best_face_for_person(
                                 frame,
                                 px1,
                                 py1,
                                 px2,
                                 py2,
-                                prefer_continuity=is_locked,
+                                prefer_continuity=False,
                                 prev_box=prev_box,
                             )
-                            # EMA smooth — prevents glitchy jump between frames
-                            smooth = _smooth_box(prev_box, face_hit.box, alpha=box_alpha)
-                            face_hit = FaceHit(
-                                box=smooth,
-                                embedding=face_hit.embedding,
-                                det_score=face_hit.det_score,
-                                yaw=face_hit.yaw,
-                                assoc=face_hit.assoc,
-                            )
                             track_face[tid] = face_hit
-                            last_face_boxes[tid] = smooth
-                            last_yaw[tid] = face_hit.yaw
-                            if face_hit.embedding is not None:
+
+                            # Confirm SCRFD faces only — never torso prior into confirmed
+                            has_scrfd = (
+                                face_hit.embedding is not None
+                                and face_hit.embedding.shape[0] == master_dim
+                                and face_hit.det_score >= min_det_for_lock
+                                and _is_plausible_face_box(face_hit.box, width, height)
+                            )
+                            if has_scrfd:
                                 faces_seen += 1
+                                smooth = _smooth_box(
+                                    prev_box, face_hit.box, alpha=box_alpha
+                                )
+                                confirmed_face[tid] = (smooth, face_hit.yaw, 0)
+                            elif prev_conf is not None:
+                                box_c, yaw_c, age_c = prev_conf
+                                new_age = age_c + detect_interval
+                                if is_locked:
+                                    # Person still tracked: keep last face ROI paintable
+                                    # (avoid profile flicker from aging out mid-shot)
+                                    new_age = min(new_age, face_hold)
+                                confirmed_face[tid] = (box_c, yaw_c, new_age)
+
+                            # Continuous verify for locked track
+                            if is_locked and has_scrfd:
+                                emb = face_hit.embedding
+                                assert emb is not None
+                                sim, iid = _max_sim_to_masters(
+                                    emb, masters, master_identity
+                                )
+                                expected = tid_to_identity.get(tid)
+                                if expected is None:
+                                    is_locked = False
+                                else:
+                                    # Pose-aware unlock bar (profiles need slack)
+                                    unlock_thr = (
+                                        _effective_match_threshold(
+                                            match_threshold, face_hit.yaw
+                                        )
+                                        - unlock_delta
+                                    )
+                                    if iid != expected or sim < unlock_thr:
+                                        unlock_miss[tid] = unlock_miss.get(tid, 0) + 1
+                                        if unlock_miss[tid] >= unlock_streak_need:
+                                            _release_identity(
+                                                expected,
+                                                f"verify fail sim={sim:.3f} thr={unlock_thr:.3f}",
+                                            )
+                                            is_locked = False
+                                    else:
+                                        unlock_miss[tid] = 0
+                                        last_embeddings[tid] = emb
 
                             if is_locked:
+                                miss_frames[tid] = 0
                                 continue
 
-                            # Re-ID only on throttle ticks
                             if frame_idx % throttle != 0:
                                 continue
+                            if not has_scrfd:
+                                match_streak[tid] = 0
+                                continue
 
-                            # Lock only from SCRFD+ArcFace face embeddings (not torso crops)
                             emb = face_hit.embedding
-                            if emb is None or emb.shape[0] != master_dim:
-                                match_streak[tid] = 0
-                                continue
-                            if face_hit.det_score < min_det_for_lock:
-                                match_streak[tid] = 0
-                                continue
-
+                            assert emb is not None
                             embed_attempts += 1
                             last_embeddings[tid] = emb
-                            sim, mid = _max_sim_to_masters(emb, masters)
+                            sim, iid = _max_sim_to_masters(
+                                emb, masters, master_identity
+                            )
                             if sim > best_sim_seen:
                                 best_sim_seen = sim
                             thr = _effective_match_threshold(
                                 match_threshold, face_hit.yaw
                             )
-                            if sim >= thr:
-                                frame_matches.append((tid, sim, mid, emb))
-                            else:
+                            conf_box = confirmed_face.get(tid)
+                            if conf_box is None:
                                 match_streak[tid] = 0
-                                if embed_attempts <= 8 or embed_attempts % 50 == 0:
-                                    logger.info(
-                                        "[blur] no-lock tid=%s sim=%.3f thr=%.3f "
-                                        "det=%.2f yaw=%.0f assoc=%.2f",
+                                continue
+                            if sim >= thr:
+                                frame_matches.append(
+                                    (
                                         tid,
                                         sim,
-                                        thr,
-                                        face_hit.det_score,
+                                        iid,
+                                        emb,
+                                        conf_box[0],
                                         face_hit.yaw,
-                                        face_hit.assoc,
+                                        face_hit.det_score,
                                     )
+                                )
+                            else:
+                                match_streak[tid] = 0
 
-                    # Re-attach after ID switch
+                    # Age confirmed faces for tracks not updated this pass
+                    for tid in list(confirmed_face.keys()):
+                        if tid not in current_ids:
+                            box_c, yaw_c, age_c = confirmed_face[tid]
+                            age_c += detect_interval
+                            if age_c > face_hold + grace:
+                                confirmed_face.pop(tid, None)
+                            else:
+                                confirmed_face[tid] = (box_c, yaw_c, age_c)
+
+                    # Best candidate per identity this tick
+                    best_by_id: Dict[
+                        int, Tuple[int, float, np.ndarray, Tuple[int, int, int, int], float]
+                    ] = {}
+                    if frame_idx % throttle == 0:
+                        for tid, sim, iid, emb, box, yaw, _det in frame_matches:
+                            cur = best_by_id.get(iid)
+                            if cur is None or sim > cur[1]:
+                                best_by_id[iid] = (tid, sim, emb, box, yaw)
+
+                    # Re-attach into empty identity slots (hold_age aged once/frame below)
                     if frame_idx % throttle == 0 and pending_reattach:
                         still_pending: List[Dict[str, object]] = []
                         for pend in pending_reattach:
                             pend["miss"] = int(pend["miss"]) + max(1, throttle)
                             if int(pend["miss"]) > grace:
                                 continue
-                            claimed = False
-                            for tid, sim, mid, emb in frame_matches:
-                                if tid in locked_targets:
-                                    continue
-                                if mid != int(pend["master_idx"]):
-                                    continue
-                                last_box = pend["box"]  # type: ignore[assignment]
-                                new_box = track_face[tid].box
-                                iou = _box_iou(new_box, last_box)  # type: ignore[arg-type]
-                                max_side = max(
-                                    last_box[2] - last_box[0],  # type: ignore[index]
-                                    last_box[3] - last_box[1],  # type: ignore[index]
-                                    1,
-                                )
-                                near = _box_center_dist(new_box, last_box) <= 1.2 * max_side  # type: ignore[arg-type]
-                                thr = _effective_match_threshold(
-                                    match_threshold, track_face[tid].yaw
-                                )
-                                if sim >= thr and (iou >= 0.12 or near):
-                                    locked_targets.add(tid)
-                                    tracks_ever_locked.add(tid)
-                                    lock_identity[tid] = mid
-                                    active_tracks[tid] = 0
-                                    match_streak[tid] = min_streak
-                                    ghost_boxes.pop(tid, None)
-                                    claimed = True
-                                    break
-                            if not claimed:
+                            iid = int(pend["identity_id"])
+                            if iid in active_lock:
+                                continue
+                            cand = best_by_id.get(iid)
+                            if cand is None:
+                                still_pending.append(pend)
+                                continue
+                            tid, sim, emb, box, yaw = cand
+                            last_box = pend["box"]  # type: ignore[assignment]
+                            if _spatial_ok(box, last_box):  # type: ignore[arg-type]
+                                confirmed_face[tid] = (box, yaw, 0)
+                                _bind_lock(iid, tid, transfer=True)
+                            else:
                                 still_pending.append(pend)
                         pending_reattach = still_pending
 
+                    # Acquire or transfer locks (one slot per identity)
                     if frame_idx % throttle == 0:
-                        matched_ids = {t for t, _, _, _ in frame_matches}
-                        for tid, sim, mid, emb in frame_matches:
-                            if tid in locked_targets:
+                        matched_tids = {t for t, *_ in frame_matches}
+                        for iid, (tid, sim, emb, box, yaw) in best_by_id.items():
+                            if iid in active_lock:
+                                old_tid = active_lock[iid]
+                                if old_tid == tid:
+                                    match_streak[tid] = match_streak.get(tid, 0) + 1
+                                    continue
+                                # Transfer only if spatially near current confirmed face
+                                old_conf = confirmed_face.get(old_tid)
+                                if old_conf and _spatial_ok(box, old_conf[0]):
+                                    confirmed_face[tid] = (box, yaw, 0)
+                                    _bind_lock(iid, tid, transfer=True)
+                                # Far away → ignore (prevents hop to bystander)
                                 continue
+
+                            # Do not steal a track already locked to someone else here;
+                            # _bind_lock handles it, but prefer a free tid.
+                            if (
+                                tid in tid_to_identity
+                                and tid_to_identity[tid] != iid
+                            ):
+                                continue
+
                             match_streak[tid] = match_streak.get(tid, 0) + 1
                             if match_streak[tid] >= min_streak:
-                                locked_targets.add(tid)
-                                tracks_ever_locked.add(tid)
-                                lock_identity[tid] = mid
-                                active_tracks[tid] = 0
-                                ghost_boxes.pop(tid, None)
-                                lock_events += 1
-                                logger.info(
-                                    "[blur] Locked track %s sim=%.3f master=%s",
-                                    tid,
-                                    sim,
-                                    mid,
-                                )
+                                confirmed_face[tid] = (box, yaw, 0)
+                                _bind_lock(iid, tid, transfer=False)
+
                         for tid in list(match_streak.keys()):
-                            if tid not in matched_ids and tid not in locked_targets:
+                            if tid not in matched_tids and tid not in tid_to_identity:
                                 match_streak[tid] = 0
 
-                    for tid in list(locked_targets):
-                        if tid not in current_ids:
-                            active_tracks[tid] = active_tracks.get(tid, 0) + detect_interval
-                            box = last_face_boxes.get(tid)
-                            if box is not None:
-                                ghost_boxes[tid] = (
-                                    box,
-                                    last_yaw.get(tid, 0.0),
-                                    ghost_ttl,
+                    # Lost YOLO tracks → pending re-attach (fresh short face hold)
+                    for iid, tid in list(active_lock.items()):
+                        if tid in current_ids:
+                            miss_frames[tid] = 0
+                            continue
+                        miss_frames[tid] = miss_frames.get(tid, 0) + detect_interval
+                        if miss_frames[tid] > grace:
+                            conf = confirmed_face.get(tid)
+                            if conf is not None:
+                                # One pending entry per identity (replace older)
+                                pending_reattach = [
+                                    p
+                                    for p in pending_reattach
+                                    if int(p["identity_id"]) != iid
+                                ]
+                                pending_reattach.append(
+                                    {
+                                        "identity_id": iid,
+                                        "box": conf[0],
+                                        "yaw": conf[1],
+                                        "emb": last_embeddings.get(tid),
+                                        "miss": 0,
+                                        "hold_age": 0,  # fresh hold window for ghost blur
+                                    }
                                 )
-                            if active_tracks[tid] > grace:
-                                mid = lock_identity.get(tid, 0)
-                                emb = last_embeddings.get(tid)
-                                if box is not None:
-                                    pending_reattach.append(
-                                        {
-                                            "master_idx": mid,
-                                            "box": box,
-                                            "emb": emb,
-                                            "miss": 0,
-                                        }
-                                    )
-                                locked_targets.discard(tid)
-                                active_tracks.pop(tid, None)
-                                match_streak.pop(tid, None)
-                                lock_identity.pop(tid, None)
-                                # keep last_face_boxes for ghost briefly
-                        else:
-                            active_tracks[tid] = 0
-                            ghost_boxes.pop(tid, None)
+                            _release_identity(iid, "track lost")
 
-                # Decay ghosts
-                for tid in list(ghost_boxes.keys()):
-                    box, yaw, ttl = ghost_boxes[tid]
-                    ttl -= 1
-                    if ttl <= 0 or tid in locked_targets:
-                        ghost_boxes.pop(tid, None)
-                    else:
-                        ghost_boxes[tid] = (box, yaw, ttl)
+                # Age pending ghost hold exactly once per processed frame (no double-count)
+                for pend in pending_reattach:
+                    pend["hold_age"] = int(pend.get("hold_age", 0)) + 1
 
-                # Always paint locks this frame (eliminates inter-detect flicker)
-                _apply_all_locks(frame)
+                _apply_identity_blurs(frame)
 
             writer.write(frame)
             frame_idx += 1
@@ -1226,7 +1388,6 @@ class BlurEngine:
         if progress_cb:
             progress_cb(99.0, "Encoding output")
 
-        # OpenCV writes every frame (blur only in [start,end]) → 1:1 with source audio
         if _transcode_for_browser(
             raw_path,
             output_path,
@@ -1244,22 +1405,23 @@ class BlurEngine:
                 raw_path.replace(output_path)
 
         duration_sec = processed / fps if fps > 0 else 0.0
-        ever = len(tracks_ever_locked)
+        id_ever = len(identities_ever_locked)
         logger.info(
             "[blur] done faces_seen=%d embed_attempts=%d best_sim=%.3f "
-            "lock_events=%d ever_locked=%d end_locked=%d",
+            "lock_events=%d identities_ever=%d tracks_ever=%d active=%d",
             faces_seen,
             embed_attempts,
             best_sim_seen,
             lock_events,
-            ever,
-            len(locked_targets),
+            id_ever,
+            len(tracks_ever_locked),
+            len(active_lock),
         )
         return {
-            # Use cumulative locks — end-state set is often empty after grace expiry
-            "target_ids_blurred": ever,
-            "tracks_ever_locked": ever,
-            "locked_at_end": len(locked_targets),
+            "target_ids_blurred": id_ever,
+            "identities_ever_locked": id_ever,
+            "tracks_ever_locked": len(tracks_ever_locked),
+            "locked_at_end": len(active_lock),
             "num_identities": num_identities,
             "faces_seen": faces_seen,
             "embed_attempts": embed_attempts,
@@ -1346,11 +1508,12 @@ def anonymize_video(
     t0 = time.perf_counter()
     with _PROCESS_LOCK:
         engine = get_blur_engine()
-        masters = engine.build_master_signatures(reference_dir)
+        masters, master_identity = engine.build_master_signatures(reference_dir)
         stats = engine.process_video(
             video_path,
             output_path,
             masters,
+            master_identity,
             match_threshold=match_threshold,
             throttle=throttle,
             grace=grace,

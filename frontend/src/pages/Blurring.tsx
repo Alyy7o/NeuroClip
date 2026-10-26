@@ -260,7 +260,7 @@ export default function Blurring() {
         processingTimeSec: procTime,
         downloadPath,
         duration: videoDurationSec || (timeRange.end > timeRange.start ? timeRange.end - timeRange.start : timeRange.end),
-        explanation: `Anonymized ${referenceImages.length} reference photo(s) · ${targetIds} person(s) blurred · ${procTime.toFixed(0)}s processing.${
+        explanation: `Anonymized ${referenceImages.length} reference photo(s) · ${targetIds} matched ${targetIds === 1 ? 'identity' : 'identities'} blurred · ${procTime.toFixed(0)}s processing.${
           query.trim() ? ` Notes: ${query.trim()}` : ''
         }`,
       });

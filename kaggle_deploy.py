@@ -33,8 +33,10 @@
 # # os.environ["BLUR_LOCKED_DET_SIZE"] = "320"
 # # os.environ["BLUR_PIPELINE"] = "1"
 # # os.environ["BLUR_CHUNK_PARALLEL"] = "1"  # auto on T4x2 for clips >= 3 min
-# # License-plate blur (Phase-1 blur-all) — download a YOLOv8 plate .pt first:
-# # os.environ["BLUR_PLATE_WEIGHTS"] = "/kaggle/input/neuroclip-blur-weights/yolov8n-license-plate.pt"
+# # License-plate blur (Phase-1 blur-all) — REQUIRED before toggling plates in UI:
+# %run install_plate_weights.py
+# # (downloads weights/yolov8n-license-plate.pt from Hugging Face)
+# os.environ["BLUR_PLATE_WEIGHTS"] = "/kaggle/working/NeuroClip/backend/Semantic-search-app/backend/weights/yolov8n-license-plate.pt"
 # # os.environ["BLUR_PLATE_INTERVAL"] = "2"
 # # optional person YOLO weights dataset:
 # # os.environ["BLUR_YOLO_WEIGHTS"] = "/kaggle/input/neuroclip-blur-weights/yolov8n.pt"
@@ -56,6 +58,9 @@
 # os.environ["BLUR_REQUIRE_GPU"] = "1"
 # # os.environ["BLUR_CHUNK_PARALLEL"] = "1"  # dual-T4 for long clips
 # %cd /kaggle/working/NeuroClip/backend/Semantic-search-app/backend
+# %run install_plate_weights.py
+# os.environ["BLUR_PLATE_WEIGHTS"] = str(__import__("pathlib").Path("weights/yolov8n-license-plate.pt").resolve())
+
 #
 # # Start API in background, then tunnel:
 # import subprocess, time

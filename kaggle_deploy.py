@@ -23,9 +23,16 @@
 # %run /kaggle/working/NeuroClip/backend/Semantic-search-app/backend/install_kaggle_blur_gpu.py
 # # (same as: pip uninstall -y onnxruntime onnxruntime-gpu && pip install onnxruntime-gpu==1.19.2)
 #
-# # 3) Env for blur GPU fail-fast
+# # 3) Env for blur GPU fail-fast + perf knobs
 # os.environ["BLUR_DEVICE"] = "cuda:0"
 # os.environ["BLUR_REQUIRE_GPU"] = "1"
+# # Sparse locked path (Phase 1) + pipeline (Phase 2) + dual-T4 chunks (Phase 3)
+# # os.environ["BLUR_TRACK_INTERVAL"] = "3"
+# # os.environ["BLUR_FACE_INTERVAL"] = "5"
+# # os.environ["BLUR_LOCKED_IMGSZ"] = "416"
+# # os.environ["BLUR_LOCKED_DET_SIZE"] = "320"
+# # os.environ["BLUR_PIPELINE"] = "1"
+# # os.environ["BLUR_CHUNK_PARALLEL"] = "1"  # auto on T4x2 for clips >= 3 min
 # # optional weights dataset:
 # # os.environ["BLUR_YOLO_WEIGHTS"] = "/kaggle/input/neuroclip-blur-weights/yolov8n.pt"
 #
@@ -44,6 +51,7 @@
 # import os
 # os.environ["BLUR_DEVICE"] = "cuda:0"
 # os.environ["BLUR_REQUIRE_GPU"] = "1"
+# # os.environ["BLUR_CHUNK_PARALLEL"] = "1"  # dual-T4 for long clips
 # %cd /kaggle/working/NeuroClip/backend/Semantic-search-app/backend
 #
 # # Start API in background, then tunnel:

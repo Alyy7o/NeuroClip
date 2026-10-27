@@ -2879,7 +2879,7 @@ async def compress_video(
 @app.post("/anonymize-video")
 async def anonymize_video_endpoint(
     file: UploadFile = File(...),
-    reference_images: List[UploadFile] = File(...),
+    reference_images: Optional[List[UploadFile]] = File(None),
     user_id: Optional[str] = Form(None),
     query: Optional[str] = Form(None),
     match_threshold: float = Form(0.78),
@@ -2888,13 +2888,24 @@ async def anonymize_video_endpoint(
     min_match_streak: int = Form(2),
     start_sec: Optional[float] = Form(None),
     end_sec: Optional[float] = Form(None),
+    blur_plates: str = Form("false"),
 ):
     """
-    Anonymize a video by blurring faces that match person(s) in reference images.
-    Uses YOLOv8 + optional InsightFace on GPU (Kaggle). Query text is stored for history only.
+    Anonymize a video by blurring faces that match reference images and/or
+    all detected license plates (Phase-1 blur-all plates).
+    Face refs are optional when blur_plates is enabled.
     """
-    if not reference_images:
-        raise HTTPException(status_code=400, detail="At least one reference image is required")
+    refs_list = [
+        r
+        for r in (reference_images or [])
+        if r is not None and (r.filename or "").strip()
+    ]
+    plates_flag = str(blur_plates).strip().lower() in ("1", "true", "yes", "on")
+    if not refs_list and not plates_flag:
+        raise HTTPException(
+            status_code=400,
+            detail="Provide at least one face reference image and/or enable blur_plates",
+        )
 
     try:
         from blur_service import anonymize_video
@@ -2923,7 +2934,7 @@ async def anonymize_video_endpoint(
         raise HTTPException(status_code=500, detail=f"File save failed: {e}")
 
     saved_refs = 0
-    for idx, ref in enumerate(reference_images):
+    for idx, ref in enumerate(refs_list):
         ref_name = Path(ref.filename or f"ref_{idx}.jpg").name
         ref_path = refs_dir / ref_name
         try:
@@ -2933,7 +2944,7 @@ async def anonymize_video_endpoint(
         except Exception as e:
             raise HTTPException(status_code=500, detail=f"Reference image save failed: {e}")
 
-    if saved_refs == 0:
+    if saved_refs == 0 and not plates_flag:
         raise HTTPException(status_code=400, detail="No reference images could be saved")
 
     query_note = (query or "").strip()
@@ -2946,10 +2957,15 @@ async def anonymize_video_endpoint(
             update_job(job_id, progress=round(pct, 1), message=msg)
 
         try:
-            update_job(job_id, message="Building face signatures", progress=2)
+            msg0 = (
+                "Building face signatures"
+                if saved_refs > 0
+                else "Preparing license-plate blur"
+            )
+            update_job(job_id, message=msg0, progress=2)
             stats = anonymize_video(
                 input_path,
-                refs_dir,
+                refs_dir if saved_refs > 0 else None,
                 output_path,
                 match_threshold=float(match_threshold),
                 throttle=int(throttle),
@@ -2958,6 +2974,8 @@ async def anonymize_video_endpoint(
                 start_sec=start_sec,
                 end_sec=end_sec,
                 progress_cb=_progress,
+                blur_plates=plates_flag,
+                blur_faces=saved_refs > 0,
             )
         except ValueError as exc:
             update_job(job_id, status="failed", error=str(exc), message=str(exc))
@@ -2988,7 +3006,7 @@ async def anonymize_video_endpoint(
                 pass
             try:
                 history_query = query_note or (
-                    f"ref_images={saved_refs} threshold={match_threshold}"
+                    f"ref_images={saved_refs} plates={plates_flag} threshold={match_threshold}"
                 )
                 # user_videos.job_id is NOT NULL — must set it (same as summarization upsert).
                 supabase.table("user_videos").upsert({
@@ -3001,7 +3019,11 @@ async def anonymize_video_endpoint(
                     "file_size": int(output_path.stat().st_size),
                     "duration": float(stats.get("video_duration_sec", 0)),
                     "status": "completed",
-                    "metadata": {"module": "blurring"},
+                    "metadata": {
+                        "module": "blurring",
+                        "blur_plates": plates_flag,
+                        "ref_images": saved_refs,
+                    },
                 }).execute()
                 supabase.table("processing_history").insert({
                     "user_id": user_id,
@@ -3035,6 +3057,7 @@ async def anonymize_video_endpoint(
         "status": "processing",
         "message": "Video queued for anonymization. Poll /anonymize-status/{job_id}.",
         "reference_images_count": saved_refs,
+        "blur_plates": plates_flag,
     }
 
 

@@ -33,7 +33,10 @@
 # # os.environ["BLUR_LOCKED_DET_SIZE"] = "320"
 # # os.environ["BLUR_PIPELINE"] = "1"
 # # os.environ["BLUR_CHUNK_PARALLEL"] = "1"  # auto on T4x2 for clips >= 3 min
-# # optional weights dataset:
+# # License-plate blur (Phase-1 blur-all) — download a YOLOv8 plate .pt first:
+# # os.environ["BLUR_PLATE_WEIGHTS"] = "/kaggle/input/neuroclip-blur-weights/yolov8n-license-plate.pt"
+# # os.environ["BLUR_PLATE_INTERVAL"] = "2"
+# # optional person YOLO weights dataset:
 # # os.environ["BLUR_YOLO_WEIGHTS"] = "/kaggle/input/neuroclip-blur-weights/yolov8n.pt"
 #
 # # 4) Verify (must print CUDAExecutionProvider)

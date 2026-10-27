@@ -9,8 +9,9 @@ import { VideoPlayer } from '@/components/VideoPlayer';
 import { ProcessingLoader } from '@/components/ProcessingLoader';
 import { ReferenceImageUpload } from '@/components/ReferenceImageUpload';
 import { Button } from '@/components/ui/button';
+import { Label } from '@/components/ui/label';
+import { Switch } from '@/components/ui/switch';
 // import { Textarea } from '@/components/ui/textarea';
-// import { Label } from '@/components/ui/label';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { useToast } from '@/hooks/use-toast';
 import { useAuth } from '@/contexts/AuthContext';
@@ -28,15 +29,16 @@ const processingSchema = z.object({
 });
 
 const blurringSteps = [
-  'Uploading video & reference images',
-  'Building master signature',
-  'Detecting & tracking persons',
+  'Uploading video & references',
+  'Building signatures / loading detectors',
+  'Detecting faces & plates',
   'Applying blur & writing output',
 ];
 
 export default function Blurring() {
   const [file, setFile] = useState<File | null>(null);
   const [referenceImages, setReferenceImages] = useState<File[]>([]);
+  const [blurPlates, setBlurPlates] = useState(false);
   const [query, setQuery] = useState('');
   const [timeRange, setTimeRange] = useState({ start: 0, end: 0 });
   const [processing, setProcessing] = useState(false);
@@ -64,10 +66,11 @@ export default function Blurring() {
       return;
     }
 
-    if (referenceImages.length === 0) {
+    if (referenceImages.length === 0 && !blurPlates) {
       toast({
-        title: 'Reference images required',
-        description: 'Add at least one photo of the person(s) to blur in the video.',
+        title: 'Nothing to anonymize',
+        description:
+          'Add at least one face reference photo, or turn on “Blur license plates”.',
         variant: 'destructive',
       });
       return;
@@ -144,6 +147,7 @@ export default function Blurring() {
       formData.append('throttle', '2');
       formData.append('grace', '45');
       formData.append('min_match_streak', '2');
+      formData.append('blur_plates', blurPlates ? 'true' : 'false');
 
       const xhr = new XMLHttpRequest();
       const uploadPromise = new Promise<Record<string, unknown>>((resolve, reject) => {
@@ -260,9 +264,16 @@ export default function Blurring() {
         processingTimeSec: procTime,
         downloadPath,
         duration: videoDurationSec || (timeRange.end > timeRange.start ? timeRange.end - timeRange.start : timeRange.end),
-        explanation: `Anonymized ${referenceImages.length} reference photo(s) · ${targetIds} matched ${targetIds === 1 ? 'identity' : 'identities'} blurred · ${procTime.toFixed(0)}s processing.${
-          query.trim() ? ` Notes: ${query.trim()}` : ''
-        }`,
+        explanation: [
+          referenceImages.length > 0
+            ? `${referenceImages.length} face ref(s) · ${targetIds} matched ${targetIds === 1 ? 'identity' : 'identities'}`
+            : 'No face refs (plates-only)',
+          blurPlates ? 'license plates blurred' : null,
+          `${procTime.toFixed(0)}s processing`,
+          query.trim() ? `Notes: ${query.trim()}` : null,
+        ]
+          .filter(Boolean)
+          .join(' · '),
       });
 
       setShowResults(true);
@@ -291,6 +302,7 @@ export default function Blurring() {
     setFile(null);
     setQuery('');
     setReferenceImages([]);
+    setBlurPlates(false);
   };
 
   const handleDownload = () => {
@@ -390,7 +402,7 @@ export default function Blurring() {
               <motion.div>
                 <h1 className="text-2xl md:text-3xl font-bold">Video Blurring</h1>
                 <p className="text-sm md:text-base text-muted-foreground">
-                  Blur faces that match your reference photos
+                  Blur matching faces and/or all license plates
                 </p>
               </motion.div>
             </div>
@@ -398,7 +410,9 @@ export default function Blurring() {
             <Card className="gradient-card border-border/50">
               <CardHeader>
                 <CardTitle>Input Video</CardTitle>
-                <CardDescription>Upload a video file (required for anonymization)</CardDescription>
+                <CardDescription>
+                  Upload a video. Face photos are optional when plate blur is on.
+                </CardDescription>
               </CardHeader>
               <CardContent className="space-y-6">
                 {file ? (
@@ -430,24 +444,28 @@ export default function Blurring() {
                   disabled={processing}
                 />
 
-                {/* Notes (optional) — hidden for now
-                <motion.div className="space-y-2">
-                  <Label htmlFor="query">Notes (optional)</Label>
-                  <Textarea
-                    id="query"
-                    placeholder="e.g., Blur only the presenter on stage (saved for history; matching uses reference photos)"
-                    value={query}
-                    onChange={(e) => setQuery(e.target.value)}
+                <div className="flex items-center justify-between gap-4 rounded-lg border border-border/60 px-4 py-3">
+                  <div className="space-y-0.5">
+                    <Label htmlFor="blur-plates" className="text-sm font-medium">
+                      Blur license plates
+                    </Label>
+                    <p className="text-xs text-muted-foreground">
+                      Detect and blur every plate in the video (no plate photos needed).
+                    </p>
+                  </div>
+                  <Switch
+                    id="blur-plates"
+                    checked={blurPlates}
+                    onCheckedChange={setBlurPlates}
                     disabled={processing}
-                    rows={3}
-                    className="resize-none"
                   />
-                </motion.div>
-                */}
+                </div>
 
                 <Button
                   onClick={handleProcess}
-                  disabled={processing || !file || referenceImages.length === 0}
+                  disabled={
+                    processing || !file || (referenceImages.length === 0 && !blurPlates)
+                  }
                   className="w-full gradient-primary hover:opacity-90 transition-opacity"
                   size="lg"
                 >

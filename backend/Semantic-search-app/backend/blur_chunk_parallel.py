@@ -172,6 +172,8 @@ def _process_one_chunk(
     throttle: int,
     grace: int,
     min_match_streak: int,
+    blur_plates: bool = False,
+    blur_faces: bool = True,
 ) -> Dict:
     # Isolate device for this worker; never nest chunk-parallel inside a chunk
     os.environ["BLUR_DEVICE"] = device
@@ -179,10 +181,16 @@ def _process_one_chunk(
     # Keep parent require-gpu policy if set; default off for local CPU tests
     if "BLUR_REQUIRE_GPU" not in os.environ:
         os.environ["BLUR_REQUIRE_GPU"] = "0"
+    import numpy as np
     from blur_service import BlurEngine
 
     engine = BlurEngine(device=device)
-    masters, master_identity = engine.build_master_signatures(ref_dir)
+    if blur_faces and ref_dir is not None and Path(ref_dir).is_dir():
+        masters, master_identity = engine.build_master_signatures(ref_dir)
+    else:
+        masters = np.zeros((0, 512), dtype=np.float32)
+        master_identity = np.zeros((0,), dtype=np.int32)
+        blur_faces = False
     stats = engine.process_video(
         chunk_path,
         out_path,
@@ -192,6 +200,8 @@ def _process_one_chunk(
         throttle=throttle,
         grace=grace,
         min_match_streak=min_match_streak,
+        blur_plates=blur_plates,
+        blur_faces=blur_faces,
     )
     if not out_path.exists():
         raise RuntimeError(f"chunk output missing after process_video: {out_path}")
@@ -225,6 +235,8 @@ def anonymize_video_chunked(
     grace: int = 30,
     min_match_streak: int = 2,
     progress_cb: Optional[Callable[[float, str], None]] = None,
+    blur_plates: bool = False,
+    blur_faces: bool = True,
 ) -> Dict:
     t0 = time.perf_counter()
     gpus = _gpu_count()
@@ -261,6 +273,8 @@ def anonymize_video_chunked(
                     throttle,
                     grace,
                     min_match_streak,
+                    blur_plates,
+                    blur_faces,
                 )
             )
 

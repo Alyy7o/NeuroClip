@@ -268,8 +268,19 @@ class TestPhase3ChunkHelpers(unittest.TestCase):
 
 
 class TestAnonymizeRouting(unittest.TestCase):
+    def _make_refs(self, td: Path) -> Path:
+        refs = td / "refs"
+        refs.mkdir()
+        # Minimal valid JPEG so has_refs passes
+        import cv2
+
+        cv2.imwrite(str(refs / "a.jpg"), np.zeros((32, 32, 3), dtype=np.uint8))
+        return refs
+
     def test_time_range_skips_chunk_parallel(self):
         """start/end trim must not enter chunk path."""
+        import tempfile
+
         lock = mock.MagicMock()
         lock.__enter__ = mock.MagicMock(return_value=None)
         lock.__exit__ = mock.MagicMock(return_value=False)
@@ -282,34 +293,40 @@ class TestAnonymizeRouting(unittest.TestCase):
             "identities_ever_locked": 0,
             "browser_ready": True,
         }
-        with mock.patch.object(chunk, "should_use_chunk_parallel") as gate:
-            with mock.patch.object(blur, "get_blur_engine", return_value=engine):
-                with mock.patch.object(blur, "_PROCESS_LOCK", lock):
-                    stats = blur.anonymize_video(
-                        Path("v.mp4"),
-                        Path("refs"),
-                        Path("out.mp4"),
-                        start_sec=1.0,
-                        end_sec=5.0,
-                    )
+        with tempfile.TemporaryDirectory() as tmp:
+            refs = self._make_refs(Path(tmp))
+            with mock.patch.object(chunk, "should_use_chunk_parallel") as gate:
+                with mock.patch.object(blur, "get_blur_engine", return_value=engine):
+                    with mock.patch.object(blur, "_PROCESS_LOCK", lock):
+                        stats = blur.anonymize_video(
+                            Path("v.mp4"),
+                            refs,
+                            Path("out.mp4"),
+                            start_sec=1.0,
+                            end_sec=5.0,
+                        )
         gate.assert_not_called()
         self.assertIn("processing_time_sec", stats)
 
     def test_chunk_parallel_preferred_when_eligible(self):
+        import tempfile
+
         lock = mock.MagicMock()
         lock.__enter__ = mock.MagicMock(return_value=None)
         lock.__exit__ = mock.MagicMock(return_value=False)
-        with mock.patch(
-            "blur_chunk_parallel.should_use_chunk_parallel", return_value=True
-        ):
+        with tempfile.TemporaryDirectory() as tmp:
+            refs = self._make_refs(Path(tmp))
             with mock.patch(
-                "blur_chunk_parallel.anonymize_video_chunked",
-                return_value={"chunk_parallel": True, "processing_time_sec": 1.0},
-            ) as chunked:
-                with mock.patch.object(blur, "_PROCESS_LOCK", lock):
-                    stats = blur.anonymize_video(
-                        Path("v.mp4"), Path("refs"), Path("out.mp4")
-                    )
+                "blur_chunk_parallel.should_use_chunk_parallel", return_value=True
+            ):
+                with mock.patch(
+                    "blur_chunk_parallel.anonymize_video_chunked",
+                    return_value={"chunk_parallel": True, "processing_time_sec": 1.0},
+                ) as chunked:
+                    with mock.patch.object(blur, "_PROCESS_LOCK", lock):
+                        stats = blur.anonymize_video(
+                            Path("v.mp4"), refs, Path("out.mp4")
+                        )
         chunked.assert_called_once()
         self.assertTrue(stats.get("chunk_parallel"))
 
